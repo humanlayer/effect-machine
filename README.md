@@ -105,7 +105,9 @@ Use `self.send(...)` from a state effect to feed work back into the machine. Sta
 
 ## Services And Layers
 
-State effects use normal Effect services. Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine and required when it runs. Provide implementations with an Effect `Layer`; no per-actor slot map is needed.
+New machines use Effect's service system for dependencies, not actor-local slot maps. Define a dependency with `Context.Service` (the Effect v4 replacement for `ServiceMap.Service`), access it with `yield*` inside a state effect, and provide an implementation with a `Layer` at the program boundary.
+
+Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine and flow through `Machine.spawn`, `system.spawn`, and `EntityMachine.layer`. Transition handlers remain pure: they cannot require services or fail. Move I/O into a state effect and communicate its outcome with an event.
 
 ```ts
 const PaymentsLive = Layer.succeed(Payments, {
@@ -120,7 +122,20 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(PaymentsLive));
 ```
 
-Transition handlers remain pure and cannot require services or fail. Use a state effect to perform I/O, then map its result to an event with `.task()`. For continuously running work that can send many events, use `.spawn()` and `ctx.self.send(...)`.
+This also makes testing conventional Effect code: provide a test layer around the actor program. `simulate` and `createTestHarness` do not run state effects, so they do not require their services.
+
+### Migrating From Slots
+
+`Slot`, `Machine.make({ slots })`, handler `({ slots })`, and `{ slots }` spawn options remain as deprecated compatibility APIs. Use them only while migrating an existing machine; they are not the DI mechanism for new code.
+
+| Legacy slot pattern                     | Effect service replacement                                               |
+| --------------------------------------- | ------------------------------------------------------------------------ |
+| `Slot.define({ charge: Slot.fn(...) })` | `class Payments extends Context.Service<...>()("@app/Payments") {}`      |
+| `Machine.make({ ..., slots })`          | Read the service in `.task(...)`, `.spawn(...)`, or `.background(...)`   |
+| `Machine.spawn(machine, { slots })`     | `Machine.spawn(machine).pipe(Effect.provide(PaymentsLive))`              |
+| `system.spawn(id, machine, { slots })`  | Provide `PaymentsLive` around the program that calls `system.spawn(...)` |
+
+Legacy slot handlers must still be supplied explicitly at every execution boundary that uses them, such as `Machine.spawn`, `system.spawn`, `simulate`, `createTestHarness`, and `Machine.replay`. Their dependencies are not inferred through the machine type, so migrate them to Effect services when possible.
 
 ## Request And Reply
 
