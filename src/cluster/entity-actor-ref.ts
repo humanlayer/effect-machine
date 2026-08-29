@@ -58,6 +58,18 @@ export interface EntityActorRef<
   ) => Effect.Effect<State, ActorStoppedError>;
 }
 
+interface TypedEntityClient<
+  State extends { readonly _tag: string },
+  Event extends { readonly _tag: string },
+> {
+  readonly Send: (request: { readonly event: Event }) => Effect.Effect<State>;
+  readonly Ask: <E extends Event & ReplyTypeBrand<unknown>>(request: {
+    readonly event: E;
+  }) => Effect.Effect<ExtractReply<E>, NoReplyError>;
+  readonly GetState: () => Effect.Effect<State>;
+  readonly WatchState: () => Stream.Stream<State>;
+}
+
 /**
  * Create an EntityActorRef from a RPC client.
  *
@@ -78,27 +90,25 @@ export const makeEntityActorRef = <
   client: RpcClient.RpcClient<Rpcs>,
   entityId: string,
 ): EntityActorRef<State, Event> => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC client has dynamic shape
-  const c = client as any;
+  // SAFETY: EntityRpcs guarantees the generated client exposes Send, Ask, GetState, and WatchState.
+  // eslint-disable-next-line anti-slop/no-chained-type-assertions -- RpcClient does not preserve method correlations
+  const c = client as unknown as TypedEntityClient<State, Event>;
 
   return {
     entityId,
-    send: (event: Event) => c.Send({ event }) as Effect.Effect<State>,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ask: ((event: any) => c.Ask({ event })) as any,
-    snapshot: c.GetState() as Effect.Effect<State>,
-    watch: c.WatchState() as Stream.Stream<State>,
+    send: (event: Event) => c.Send({ event }),
+    ask: (event) => c.Ask({ event }),
+    snapshot: c.GetState(),
+    watch: c.WatchState(),
     waitFor: (predicate: (state: State) => boolean) =>
       Effect.gen(function* () {
         // Snapshot first — if current state already matches, return immediately
-        const current = yield* c.GetState() as Effect.Effect<State>;
+        const current = yield* c.GetState();
         if (predicate(current)) return current;
         // Fall through to streaming observation
-        const result = yield* (c.WatchState() as Stream.Stream<State>).pipe(
-          Stream.filter(predicate),
-          Stream.take(1),
-          Stream.runHead,
-        );
+        const result = yield* c
+          .WatchState()
+          .pipe(Stream.filter(predicate), Stream.take(1), Stream.runHead);
         if (Option.isSome(result)) return result.value;
         return yield* new ActorStoppedError({ actorId: entityId });
       }),

@@ -134,15 +134,17 @@ export const getTag = (
   constructorOrValue: { _tag: string } | ((...args: never[]) => { _tag: string }),
 ): string => {
   // Direct _tag property (values or static on constructors)
-  if ("_tag" in constructorOrValue && typeof constructorOrValue._tag === "string") {
+  if ("_tag" in constructorOrValue) {
     return constructorOrValue._tag;
   }
   // Fallback: instantiate (Data.taggedEnum compatibility)
   // Try zero-arg first, then empty object for record constructors
   try {
+    // SAFETY: the remaining union member is a tagged constructor callable without payload data.
     return (constructorOrValue as () => { _tag: string })()._tag;
   } catch {
-    return (constructorOrValue as (args: object) => { _tag: string })({})._tag;
+    // SAFETY: Data tagged record constructors accept an empty record when zero-argument invocation fails.
+    return (constructorOrValue as (args: Record<string, never>) => { _tag: string })({})._tag;
   }
 };
 

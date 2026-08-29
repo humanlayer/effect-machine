@@ -40,7 +40,7 @@ export type ActorExit<S> =
 /** Constructors for ActorExit */
 export const ActorExit = {
   Final: <S>(state: S): ActorExit<S> => ({ _tag: "Final", state }),
-  Stopped: { _tag: "Stopped" } as ActorExit<never>,
+  Stopped: { _tag: "Stopped" } satisfies ActorExit<never>,
   Defect: <S = never>(cause: Cause.Cause<unknown>, phase: DefectPhase): ActorExit<S> => ({
     _tag: "Defect",
     cause,

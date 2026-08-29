@@ -65,8 +65,11 @@ export const runTransitionHandler = Effect.fn("effect-machine.runTransitionHandl
 
   const resolved = isEffect(raw)
     ? yield* (
-        raw as Effect.Effect<S | ReplyResult<S, unknown> | DeferReplyResult<S>, never, R>
-      ).pipe(Effect.provideService(machine.Context, ctx))
+        // SAFETY: isEffect established the runtime branch; handler typing supplies its result domains.
+        (raw as Effect.Effect<S | ReplyResult<S, unknown> | DeferReplyResult<S>, never, R>).pipe(
+          Effect.provideService(machine.Context, ctx),
+        )
+      )
     : raw;
 
   // Detect branded ReplyResult (created via Machine.reply())
@@ -307,6 +310,7 @@ export const processEventCore = Effect.fn("effect-machine.processEventCore")(fun
     }
 
     // Run spawn effects for new state
+    // SAFETY: internal lifecycle events are consumed only by state effects and carry the required tag.
     const enterEvent = { _tag: INTERNAL_ENTER_EVENT } as E;
     yield* runSpawnEffects(
       machine,
@@ -447,7 +451,7 @@ const indexCache = new WeakMap<object, MachineIndex<any, any, any, any>>();
 /**
  * Invalidate cached index for a machine (call after mutation).
  */
-export const invalidateIndex = (machine: object): void => {
+export const invalidateIndex = <M extends object>(machine: M): void => {
   indexCache.delete(machine);
 };
 
@@ -521,6 +525,7 @@ const getIndex = <
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Schema fields need wide acceptance
   machine: Machine<S, E, R, any, any, SD>,
 ): MachineIndex<S, E, SD, R> => {
+  // SAFETY: each cache entry is created from and keyed by this exact machine instance.
   let index = indexCache.get(machine) as MachineIndex<S, E, SD, R> | undefined;
   if (index === undefined) {
     index = {

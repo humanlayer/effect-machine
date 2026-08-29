@@ -231,7 +231,7 @@ const inspectionAttributes = <
   E extends { readonly _tag: string },
 >(
   event: InspectionEvent<S, E>,
-): Record<string, string | number | boolean> => {
+) => {
   const shared = {
     "machine.actor.id": event.actorId,
     "machine.inspection.type": event.type,
@@ -259,13 +259,16 @@ const inspectionAttributes = <
         "machine.state.current": event.state._tag,
         "machine.effect.kind": event.effectType,
       };
-    case "@machine.task":
-      return {
+    case "@machine.task": {
+      const attributes = {
         ...shared,
         "machine.state.current": event.state._tag,
         "machine.task.phase": event.phase,
-        ...(event.taskName === undefined ? {} : { "machine.task.name": event.taskName }),
       };
+      return event.taskName === undefined
+        ? attributes
+        : { ...attributes, "machine.task.name": event.taskName };
+    }
     case "@machine.error":
       return {
         ...shared,
@@ -284,8 +287,8 @@ export const tracingInspector = <
   options?: TracingInspectorOptions<S, E>,
 ): InspectorService<S, E> => ({
   onInspect: (event) => {
-    const spanName =
-      typeof options?.spanName === "function" ? options.spanName(event) : options?.spanName;
+    const spanNameOption = options?.spanName;
+    const spanName = isSpanNameResolver(spanNameOption) ? spanNameOption(event) : spanNameOption;
     const traceName = options?.eventName?.(event) ?? inspectionTraceName(event);
     const attributes = {
       ...inspectionAttributes(event),
@@ -303,6 +306,10 @@ export const tracingInspector = <
     }).pipe(Effect.withSpan(spanName ?? inspectionSpanName(event), { attributes }));
   },
 });
+
+const isSpanNameResolver = <S, E>(
+  value: string | ((event: InspectionEvent<S, E>) => string) | undefined,
+): value is (event: InspectionEvent<S, E>) => string => typeof value === "function";
 
 // ============================================================================
 // Built-in Inspectors

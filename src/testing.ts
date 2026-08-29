@@ -61,6 +61,7 @@ export const simulate = Effect.fn("effect-machine.simulate")(function* <
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   options?: { slots?: ProvideSlots<SD, any> },
 ) {
+  // SAFETY: materialization preserves this input machine's state, event, and slot domains.
   const machine = materializeMachine(input, options?.slots) as Machine<
     S,
     E,
@@ -306,6 +307,7 @@ export const createTestHarness = Effect.fn("effect-machine.createTestHarness")(f
   R,
   SD extends SlotsDef = Record<string, never>,
 >(input: MachineInput<S, E, R, SD>, options?: TestHarnessOptions<S, E, SD>) {
+  // SAFETY: materialization preserves this input machine's state, event, and slot domains.
   const machine = materializeMachine(input, options?.slots) as Machine<
     S,
     E,

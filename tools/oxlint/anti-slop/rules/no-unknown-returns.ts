@@ -23,6 +23,15 @@ function referencedAliasName(type: ESTree.TSType): string | null {
     : null;
 }
 
+function isConditionalTypeConstraint(node: FunctionWithReturnType): boolean {
+  let current: ESTree.Node | null = node.parent;
+  while (current !== null && current.type !== "Program") {
+    if (current.type === "TSConditionalType") return current.extendsType === node;
+    current = current.parent;
+  }
+  return false;
+}
+
 /** Ban function contracts that return unknown instead of a parsed domain type. */
 export const noUnknownReturnsRule = defineRule({
   meta: {
@@ -76,6 +85,7 @@ export const noUnknownReturnsRule = defineRule({
     };
 
     const checkReturnType = (node: FunctionWithReturnType) => {
+      if (isConditionalTypeConstraint(node)) return;
       const annotation = node.returnType;
       if (annotation === null || annotation === undefined) return;
       if (

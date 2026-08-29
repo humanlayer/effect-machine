@@ -63,6 +63,11 @@ type PayloadFields<F extends Schema.Struct.Fields> = {
   readonly [K in keyof F as K extends ReplySchemaSymbol ? never : K]: F[K];
 };
 
+type TaggedSource = { readonly _tag: string };
+
+// eslint-disable-next-line anti-slop/no-unsafe-dictionary-type -- dynamic schema construction is isolated behind this alias
+type DynamicFields = Record<string, unknown>;
+
 // ============================================================================
 // Type Helpers
 // ============================================================================
@@ -125,13 +130,13 @@ type VariantConstructors<D extends Record<string, Schema.Struct.Fields>, Brand> 
     ? TaggedStructType<K, D[K]> &
         Brand &
         VariantReplyBrand<D[K]> & {
-          readonly with: (source: object) => TaggedStructType<K, D[K]> & Brand;
+          readonly with: (source: TaggedSource) => TaggedStructType<K, D[K]> & Brand;
         }
     : ((
         args: Schema.Struct.Type<PayloadFields<D[K]>>,
       ) => TaggedStructType<K, D[K]> & Brand & VariantReplyBrand<D[K]>) & {
         readonly with: (
-          source: object,
+          source: TaggedSource,
           partial?: Partial<Schema.Struct.Type<PayloadFields<D[K]>>>,
         ) => TaggedStructType<K, D[K]> & Brand;
         readonly _tag: K;
@@ -146,12 +151,25 @@ type VariantConstructors<D extends Record<string, Schema.Struct.Fields>, Brand> 
 type SharedKeys<D extends Record<string, Schema.Struct.Fields>> = keyof D[keyof D & string] &
   string;
 
+type SharedFields<D extends Record<string, Schema.Struct.Fields>> = {
+  readonly [K in SharedKeys<D>]?: D[keyof D & string][K] extends Schema.Top
+    ? Schema.Schema.Type<D[keyof D & string][K]>
+    : never;
+};
+
 /**
  * Pattern matching cases type
  */
 type MatchCases<D extends Record<string, Schema.Struct.Fields>, R> = {
   readonly [K in keyof D & string]: (value: TaggedStructType<K, D[K]>) => R;
 };
+
+interface MatchFunction<D extends Record<string, Schema.Struct.Fields>, Brand> {
+  <R>(cases: MatchCases<D, R>): (value: VariantsUnion<D> & TaggedSource & Brand) => R;
+  <R>(value: VariantsUnion<D> & TaggedSource & Brand, cases: MatchCases<D, R>): R;
+}
+
+type RuntimeMatchCases<R> = Record<string, (value: TaggedSource) => R>;
 
 /**
  * Base schema interface with pattern matching helpers
@@ -177,12 +195,7 @@ interface MachineSchemaBase<D extends Record<string, Schema.Struct.Fields>, Bran
   /**
    * Pattern matching (curried and uncurried)
    */
-  readonly $match: {
-    // Curried: $match(cases)(value)
-    <R>(cases: MatchCases<D, R>): (value: VariantsUnion<D> & Brand) => R;
-    // Uncurried: $match(value, cases)
-    <R>(value: VariantsUnion<D> & Brand, cases: MatchCases<D, R>): R;
-  };
+  readonly $match: MatchFunction<D, Brand>;
 
   /**
    * Copy fields from `source` into the same variant, overriding with `partial`.
@@ -201,10 +214,7 @@ interface MachineSchemaBase<D extends Record<string, Schema.Struct.Fields>, Bran
    *   MyState.with(state, { queue })
    * ```
    */
-  readonly with: <S extends VariantsUnion<D> & Brand>(
-    source: S,
-    partial?: Partial<Record<SharedKeys<D>, unknown>>,
-  ) => S;
+  readonly with: <S extends VariantsUnion<D> & Brand>(source: S, partial?: SharedFields<D>) => S;
 
   /**
    * Reply schemas per variant tag. Only populated for event schemas
@@ -259,23 +269,39 @@ export type MachineEventSchema<D extends Record<string, Schema.Struct.Fields>> =
  */
 const RESERVED_DERIVE_KEYS = new Set(["_tag"]);
 
+/* eslint-disable anti-slop/no-unsafe-dictionary-type -- isolated erased schema-construction boundary */
+type RuntimeWith = (source: TaggedSource, partial?: DynamicFields) => DynamicFields;
+
+type RuntimeConstructor =
+  | (((args: DynamicFields) => DynamicFields) & { readonly _tag: string; with: RuntimeWith })
+  | (TaggedSource & { with: RuntimeWith });
+/* eslint-enable anti-slop/no-unsafe-dictionary-type */
+
+interface BuiltMachineSchema<D extends Record<string, Schema.Struct.Fields>> {
+  readonly schema: Schema.Schema<VariantsUnion<D>>;
+  readonly variants: VariantSchemas<D>;
+  readonly constructors: Record<string, RuntimeConstructor>;
+  readonly _definition: D;
+  readonly replySchemas: Map<string, Schema.Decoder<unknown>>;
+  readonly $is: MachineSchemaBase<D, unknown>["$is"];
+  readonly $match: MatchFunction<D, unknown>;
+}
+
+const hasTag = (value: unknown): value is TaggedSource =>
+  typeof value === "object" && value !== null && "_tag" in value;
+
+const readDynamicField = (source: TaggedSource, key: string) => {
+  // SAFETY: schema-derived state values are records whose enumerable payload fields are keyed by strings.
+  return (source as DynamicFields)[key];
+};
+
 const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
   definition: D,
-): {
-  schema: Schema.Schema<VariantsUnion<D>>;
-  variants: VariantSchemas<D>;
-  constructors: Record<string, (args: Record<string, unknown>) => Record<string, unknown>>;
-  _definition: D;
-  replySchemas: Map<string, Schema.Decoder<unknown>>;
-  $is: <Tag extends string>(tag: Tag) => (u: unknown) => boolean;
-  $match: (valueOrCases: unknown, maybeCases?: unknown) => unknown;
-} => {
+): BuiltMachineSchema<D> => {
   // Build variant schemas
+  // SAFETY: every key is populated from definition before the schema is exposed.
   const variants = {} as Record<string, Schema.TaggedStruct<string, Schema.Struct.Fields>>;
-  const constructors = {} as Record<
-    string,
-    (args: Record<string, unknown>) => Record<string, unknown>
-  >;
+  const constructors: Record<string, RuntimeConstructor> = {};
   const replySchemas = new Map<string, Schema.Decoder<unknown>>();
 
   for (const tag of Object.keys(definition)) {
@@ -284,6 +310,7 @@ const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
 
     // Detect reply schema before passing to TaggedStruct
     if (ReplySchemaSymbol in fields) {
+      // SAFETY: ReplySchemaSymbol membership establishes the hidden decoder metadata property.
       const rs = (fields as Record<symbol, Schema.Decoder<unknown>>)[ReplySchemaSymbol];
       if (rs !== undefined) replySchemas.set(tag, rs);
     }
@@ -299,12 +326,13 @@ const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
 
     if (hasFields) {
       // Non-empty: constructor function requiring args
-      const constructor = (args: Record<string, unknown>) => ({ ...args, _tag: tag });
+      const constructor = (args: DynamicFields) => ({ ...args, _tag: tag });
       constructor._tag = tag;
-      constructor.with = (source: Record<string, unknown>, partial?: Record<string, unknown>) => {
-        const result: Record<string, unknown> = { _tag: tag };
+      constructor.with = (source: TaggedSource, partial?: DynamicFields) => {
+        // eslint-disable-next-line anti-slop/no-known-value-widening -- payload fields are selected dynamically from schema keys
+        const result: DynamicFields = { _tag: tag };
         for (const key of fieldNames) {
-          if (key in source) result[key] = source[key];
+          if (key in source) result[key] = readDynamicField(source, key);
         }
         if (partial !== undefined) {
           for (const [key, value] of Object.entries(partial)) {
@@ -318,6 +346,7 @@ const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
       constructors[tag] = constructor;
     } else {
       // Empty: plain value, not callable
+      // SAFETY: empty variants require no payload and expose only the common runtime with contract.
       constructors[tag] = { _tag: tag, with: () => ({ _tag: tag }) } as never;
     }
   }
@@ -333,21 +362,29 @@ const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
     variantArray.length === 1
       ? // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- checked length above
         variantArray[0]!
-      : // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic schema union
+      : // SAFETY: the length check establishes the non-empty tuple required by Schema.Union.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic schema union
         Schema.Union(variantArray as any);
 
   // Type guard
   const $is =
-    <Tag extends string>(tag: Tag) =>
-    (u: unknown): boolean =>
-      typeof u === "object" && u !== null && "_tag" in u && (u as { _tag: string })._tag === tag;
+    <Tag extends keyof D & string>(tag: Tag) =>
+    (value: unknown): value is TaggedStructType<Tag, D[Tag]> =>
+      hasTag(value) && value._tag === tag;
 
   // Pattern matching
-  const $match = (valueOrCases: unknown, maybeCases?: unknown): unknown => {
+  function $match<R>(cases: MatchCases<D, R>): (value: VariantsUnion<D> & TaggedSource) => R;
+  function $match<R>(value: VariantsUnion<D> & TaggedSource, cases: MatchCases<D, R>): R;
+  function $match<R>(
+    valueOrCases: (VariantsUnion<D> & TaggedSource) | MatchCases<D, R>,
+    maybeCases?: MatchCases<D, R>,
+  ): R | ((value: VariantsUnion<D> & TaggedSource) => R) {
     if (maybeCases !== undefined) {
       // Uncurried: $match(value, cases)
-      const value = valueOrCases as { _tag: string };
-      const cases = maybeCases as Record<string, (v: unknown) => unknown>;
+      // SAFETY: the two-argument overload requires a tagged value as its first argument.
+      const value = valueOrCases as TaggedSource;
+      // SAFETY: every handler receives a variant selected by that value's matching tag.
+      const cases = maybeCases as RuntimeMatchCases<R>;
       const handler = cases[value._tag];
       if (handler === undefined) {
         throw new MissingMatchHandlerError({ tag: value._tag });
@@ -355,19 +392,23 @@ const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
       return handler(value);
     }
     // Curried: $match(cases) -> (value) => result
-    const cases = valueOrCases as Record<string, (v: unknown) => unknown>;
-    return (value: { _tag: string }): unknown => {
+    // SAFETY: the one-argument overload requires the complete case map.
+    const cases = valueOrCases as RuntimeMatchCases<R>;
+    return (value: VariantsUnion<D> & TaggedSource): R => {
       const handler = cases[value._tag];
       if (handler === undefined) {
         throw new MissingMatchHandlerError({ tag: value._tag });
       }
       return handler(value);
     };
-  };
+  }
 
+  // SAFETY: the union and variants are assembled exclusively from the same definition D.
   return {
+    // eslint-disable-next-line anti-slop/no-chained-type-assertions -- Effect's dynamic union loses D's static relationship
     schema: unionSchema as unknown as Schema.Schema<VariantsUnion<D>>,
-    variants: variants as unknown as VariantSchemas<D>,
+    // eslint-disable-next-line anti-slop/no-known-value-widening -- keys were populated from definition D above
+    variants: variants as VariantSchemas<D>,
     constructors,
     _definition: definition,
     replySchemas,
@@ -384,16 +425,12 @@ const createMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(def
   const { schema, variants, constructors, _definition, replySchemas, $is, $match } =
     buildMachineSchema(definition);
   // Union-level with: dispatch to per-variant with based on _tag
-  const withFn = (source: { _tag: string }, partial?: Record<string, unknown>) => {
+  const withFn = (source: TaggedSource, partial?: DynamicFields) => {
     const ctor = constructors[source._tag];
     if (ctor === undefined) {
       throw new MissingMatchHandlerError({ tag: source._tag });
     }
-    const fn = (ctor as { with?: (s: object, p?: object) => object }).with;
-    if (fn === undefined) {
-      throw new MissingMatchHandlerError({ tag: source._tag });
-    }
-    return fn(source, partial);
+    return ctor.with(source, partial);
   };
 
   return Object.assign(Object.create(schema), {
@@ -439,7 +476,10 @@ const createMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(def
  */
 export const State = <const D extends Record<string, Schema.Struct.Fields>>(
   definition: D,
-): MachineStateSchema<D> => createMachineSchema(definition) as MachineStateSchema<D>;
+): MachineStateSchema<D> => {
+  // SAFETY: createMachineSchema builds every constructor and schema member from definition D.
+  return createMachineSchema(definition) as MachineStateSchema<D>;
+};
 
 /**
  * Create a schema-first Event definition.
@@ -470,7 +510,10 @@ export const State = <const D extends Record<string, Schema.Struct.Fields>>(
  */
 const EventImpl = <const D extends Record<string, Schema.Struct.Fields>>(
   definition: D,
-): MachineEventSchema<D> => createMachineSchema(definition) as MachineEventSchema<D>;
+): MachineEventSchema<D> => {
+  // SAFETY: createMachineSchema builds every constructor and schema member from definition D.
+  return createMachineSchema(definition) as MachineEventSchema<D>;
+};
 
 /**
  * Annotate event fields with a reply schema.
@@ -480,6 +523,7 @@ const replyFieldsFn = <F extends Schema.Struct.Fields, RS extends Schema.Schema<
   fields: F,
   replySchema: RS,
 ): ReplyFields<F, RS> => {
+  // SAFETY: Object.defineProperty below installs the non-enumerable metadata property on this copy.
   const annotated = { ...fields } as ReplyFields<F, RS>;
   Object.defineProperty(annotated, ReplySchemaSymbol, {
     value: replySchema,

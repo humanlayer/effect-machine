@@ -81,8 +81,26 @@ export interface MachineRef<Event> {
    * Only usable when the transition handler returned `Machine.deferReply(state)`.
    * Returns true if a pending reply was settled, false if none was pending.
    */
-  readonly reply: (value: unknown) => Effect.Effect<boolean>;
+  readonly reply: <Reply>(value: Reply) => Effect.Effect<boolean>;
 }
+
+interface ReplySchemaCarrier {
+  readonly _replySchemas: ReadonlyMap<string, Schema.Decoder<unknown>>;
+}
+
+const hasReplySchemas = <A>(
+  schema: Schema.Schema<A>,
+): schema is Schema.Schema<A> & ReplySchemaCarrier => "_replySchemas" in schema;
+
+const isStateResolver = <State, Value>(
+  value: Value | ((state: State) => Value),
+): value is (state: State) => Value => typeof value === "function";
+
+const isString = <Value>(value: string | Value | undefined): value is string =>
+  typeof value === "string";
+
+// eslint-disable-next-line typescript/no-explicit-any, anti-slop/no-unsafe-dictionary-type -- deprecated slots erase handler types at execution boundaries
+type LegacySlotHandlers = Record<string, any>;
 
 /**
  * Handler context passed to transition handlers
@@ -278,7 +296,7 @@ export const materializeMachine = <S, E, R, SD extends SlotsDef>(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   machine: Machine<S, E, R, any, any, SD>,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  handlers?: Record<string, any>,
+  handlers?: LegacySlotHandlers,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Machine<S, E, never, any, any, SD> => {
   if (handlers === undefined) {
@@ -290,6 +308,7 @@ export const materializeMachine = <S, E, R, SD extends SlotsDef>(
       const missing = Object.keys(machine._slotsSchema.definitions);
       throw new ProvisionValidationError({ missing, extra: [] });
     }
+    // SAFETY: changing only the erased requirement parameter does not alter the machine value.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return machine as any;
   }
@@ -333,16 +352,22 @@ export const materializeMachine = <S, E, R, SD extends SlotsDef>(
   );
 
   // Copy arrays/sets
+  // SAFETY: this fresh machine has the same state, event, and slot definitions as the source.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (result as any)._transitions = [...machine._transitions];
+  // SAFETY: final-state tags are independent of the erased Effect requirement.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (result as any)._finalStates = new Set(machine._finalStates);
+  // SAFETY: spawn handlers retain the source machine's state, event, and slot definitions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (result as any)._spawnEffects = [...machine._spawnEffects];
+  // SAFETY: background handlers retain the source machine's state, event, and slot definitions.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (result as any)._backgroundEffects = [...machine._backgroundEffects];
+  // SAFETY: postpone rules contain only validated state and event tags.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (result as any)._postponeRules = [...machine._postponeRules];
+  // SAFETY: reply schemas are immutable metadata copied from the same event schema.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (result as any)._replySchemas = machine._replySchemas;
 
@@ -391,6 +416,7 @@ export class Machine<
   /** @internal */ readonly _slotsSchema?: SlotsSchema<SD>;
   /** @internal */ readonly _slotHandlers: Map<
     string,
+    // eslint-disable-next-line anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns -- deprecated slot boundary
     (params: unknown) => unknown | Effect.Effect<unknown, never, R>
   >;
   /** @internal */ readonly _slots: SlotCalls<SD>;
@@ -446,8 +472,10 @@ export class Machine<
     this._finalStates = new Set();
     this._postponeRules = [];
     this._slotsSchema = slotsSchema;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    this._replySchemas = (eventSchema as any)?._replySchemas ?? new Map();
+    this._replySchemas =
+      eventSchema !== undefined && hasReplySchemas(eventSchema)
+        ? eventSchema._replySchemas
+        : new Map();
     this._slotHandlers = new Map();
     this._slotValidation = slotValidation;
     this.stateSchema = stateSchema;
@@ -468,7 +496,7 @@ export class Machine<
         : undefined;
 
     // Create slot closures — unified single map
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, anti-slop/no-unknown-parameters -- deprecated slot boundary
     const resolve = (name: string, params: unknown): Effect.Effect<any> =>
       Effect.flatMap(Effect.serviceOption(this.Context), (maybeCtx) => {
         if (Option.isNone(maybeCtx)) {
@@ -501,6 +529,7 @@ export class Machine<
         // If decodeInput returned an Effect.die, short-circuit
         if (Effect.isEffect(validatedParams)) {
           // @effect-diagnostics anyUnknownInErrorContext:off
+          // SAFETY: Effect.isEffect established the branch value is an Effect.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           return validatedParams as Effect.Effect<any>;
         }
@@ -515,6 +544,7 @@ export class Machine<
           resultEffect = Effect.void;
         } else if (Effect.isEffect(result)) {
           // @effect-diagnostics anyUnknownInErrorContext:off
+          // SAFETY: Effect.isEffect established the branch value is an Effect.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           resultEffect = result as Effect.Effect<any>;
         } else {
@@ -544,10 +574,12 @@ export class Machine<
         return resultEffect;
       });
 
-    this._slots =
-      this._slotsSchema !== undefined
-        ? this._slotsSchema._createSlots(resolve)
-        : ({} as SlotCalls<SD>);
+    if (this._slotsSchema !== undefined) {
+      this._slots = this._slotsSchema._createSlots(resolve);
+    } else {
+      // SAFETY: a machine without a slot schema has no callable slot keys.
+      this._slots = {} as SlotCalls<SD>;
+    }
   }
 
   // ---- on ----
@@ -578,7 +610,7 @@ export class Machine<
       | ReadonlyArray<TaggedOrConstructor<VariantsUnion<_SD> & BrandedState>>,
     build: (
       scope: TransitionScope<State, Event, R, _SD, _ED, SD, VariantsUnion<_SD> & BrandedState>,
-    ) => unknown,
+    ) => void,
   ) {
     const states = Array.isArray(stateOrStates) ? stateOrStates : [stateOrStates];
     build(new TransitionScope(this, states));
@@ -597,12 +629,7 @@ export class Machine<
     reenter: boolean,
   ): Machine<State, Event, R, _SD, _ED, SD> {
     for (const state of states) {
-      this.addTransition(
-        state,
-        event,
-        handler as TransitionHandler<NS, NE, BrandedState, SD, never>,
-        reenter,
-      );
+      this.addTransition(state, event, handler, reenter);
     }
     return this;
   }
@@ -700,20 +727,26 @@ export class Machine<
     const transition: Transition<State, Event, SD, R> = {
       stateTag: "*",
       eventTag,
+      // SAFETY: registration preserves the same machine state, event, slot, and requirement domains.
+      // eslint-disable-next-line anti-slop/no-chained-type-assertions -- handler variance is erased in registry storage
       handler: handler as unknown as Transition<State, Event, SD, R>["handler"],
       reenter: false,
     };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this._transitions as any[]).push(transition);
+    this._transitions.push(transition);
     invalidateIndex(this);
     return this;
   }
 
   /** @internal */
-  private addTransition<NS extends BrandedState, NE extends BrandedEvent>(
+  private addTransition<
+    NS extends BrandedState,
+    NE extends BrandedEvent,
+    RS extends BrandedState,
+    Reply,
+  >(
     state: TaggedOrConstructor<NS>,
     event: TaggedOrConstructor<NE>,
-    handler: TransitionHandler<NS, NE, BrandedState, SD, never>,
+    handler: TransitionHandler<NS, NE, RS, SD, never, Reply>,
     reenter: boolean,
   ): Machine<State, Event, R, _SD, _ED, SD> {
     const stateTag = getTag(state);
@@ -722,12 +755,13 @@ export class Machine<
     const transition: Transition<State, Event, SD, R> = {
       stateTag,
       eventTag,
+      // SAFETY: registration preserves the same machine state, event, slot, and requirement domains.
+      // eslint-disable-next-line anti-slop/no-chained-type-assertions -- handler variance is erased in registry storage
       handler: handler as unknown as Transition<State, Event, SD, R>["handler"],
       reenter,
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this._transitions as any[]).push(transition);
+    this._transitions.push(transition);
     invalidateIndex(this);
 
     return this;
@@ -769,9 +803,10 @@ export class Machine<
     const states = Array.isArray(stateOrStates) ? stateOrStates : [stateOrStates];
     for (const s of states) {
       const stateTag = getTag(s);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (this._spawnEffects as any[]).push({
+      this._spawnEffects.push({
         stateTag,
+        // SAFETY: the effect is indexed under the exact state tag supplied with this handler.
+        // eslint-disable-next-line anti-slop/no-chained-type-assertions -- selected-state variance is erased in registry storage
         handler: handler as unknown as SpawnEffect<State, Event, SD, R>["handler"],
       });
     }
@@ -888,6 +923,7 @@ export class Machine<
       return yield* Effect.failCause(cause).pipe(Effect.orDie);
     });
 
+    // SAFETY: the overload implementation accepts the same state selection and task handler contract.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this.spawn(stateOrStates, handler as any);
   }
@@ -920,19 +956,13 @@ export class Machine<
     config: TimeoutConfig<NS, VariantsUnion<_ED> & BrandedEvent>,
   ): Machine<State, Event, R, _SD, _ED, SD> {
     const stateTag = getTag(state);
-    const resolveDuration =
-      typeof config.duration === "function"
-        ? (config.duration as (state: NS) => Duration.Input)
-        : () => config.duration as Duration.Input;
-    const resolveEvent =
-      typeof config.event === "function"
-        ? (config.event as (state: NS) => VariantsUnion<_ED> & BrandedEvent)
-        : () => config.event as VariantsUnion<_ED> & BrandedEvent;
+    const duration = config.duration;
+    const event = config.event;
+    const resolveDuration = isStateResolver(duration) ? duration : () => duration;
+    const resolveEvent = isStateResolver(event) ? event : () => event;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (this as any).task(state, (ctx: any) => Effect.sleep(resolveDuration(ctx.state)), {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      onSuccess: (_: void, ctx: any) => resolveEvent(ctx.state),
+    return this.task(state, (ctx) => Effect.sleep(resolveDuration(ctx.state)), {
+      onSuccess: (_: void, ctx) => resolveEvent(ctx.state),
       name: `$timeout:${stateTag}`,
     });
   }
@@ -954,8 +984,9 @@ export class Machine<
   background<R1>(
     handler: StateEffectHandler<State, Event, SD, Scope.Scope | R1>,
   ): Machine<State, Event, R | R1, _SD, _ED, SD> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this._backgroundEffects as any[]).push({
+    this._backgroundEffects.push({
+      // SAFETY: the handler retains this machine's state, event, and slot domains.
+      // eslint-disable-next-line anti-slop/no-chained-type-assertions -- requirement variance is erased in registry storage
       handler: handler as unknown as BackgroundEffect<State, Event, SD, R>["handler"],
     });
     return this;
@@ -1016,10 +1047,14 @@ export class Machine<
     E extends BrandedEvent,
     SLD extends SlotsDef = Record<string, never>,
   >(config: MakeConfig<SD, ED, S, E, SLD>): Machine<S, E, never, SD, ED, SLD> {
+    // SAFETY: MakeConfig ties S to the Type member of this exact state schema.
+    const stateSchema = config.state as Schema.Schema<S>;
+    // SAFETY: MakeConfig ties E to the Type member of this exact event schema.
+    const eventSchema = config.event as Schema.Schema<E>;
     return new Machine<S, E, never, SD, ED, SLD>(
       config.initial,
-      config.state as unknown as Schema.Schema<S>,
-      config.event as unknown as Schema.Schema<E>,
+      stateSchema,
+      eventSchema,
       config.slots,
       config.slotValidation ?? true,
     );
@@ -1117,15 +1152,15 @@ const spawnImpl = Effect.fn("effect-machine.spawn")(function* <
         id?: string;
         hydrate?: S;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        slots?: Record<string, any>;
+        slots?: LegacySlotHandlers;
         supervision?: Supervision.Policy;
         lifecycle?: Lifecycle<S, E>;
       },
 ) {
-  const opts = typeof idOrOptions === "string" ? { id: idOrOptions } : idOrOptions;
+  const opts = isString(idOrOptions) ? { id: idOrOptions } : idOrOptions;
   const actorId = opts?.id ?? `actor-${(yield* Random.next).toString(36).slice(2)}`;
   const materialized = materializeMachine(machine, opts?.slots);
-  const actor = yield* createActor(actorId, materialized as AnyMachine<S, E, never>, {
+  const actor = yield* createActor(actorId, materialized, {
     initialState: opts?.hydrate,
     supervision: opts?.supervision,
     lifecycle: opts?.lifecycle,
@@ -1243,7 +1278,7 @@ const replayImpl = Effect.fn("effect-machine.replay")(function* <
   input: AnyMachine<S, E, R>,
   events: ReadonlyArray<E>,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { from?: S; slots?: Record<string, any> },
+  options?: { from?: S; slots?: LegacySlotHandlers },
 ) {
   const machine = materializeMachine(input, options?.slots);
   let state: S = options?.from ?? machine.initial;

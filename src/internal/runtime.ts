@@ -31,7 +31,7 @@ import {
 } from "effect";
 
 import type { Machine, MachineRef } from "../machine.js";
-import type { ActorSystemService } from "../actor.js";
+import type { ActorRef, ActorSystemService } from "../actor.js";
 import { ActorSystem as ActorSystemTag } from "../actor.js";
 import type { ProcessEventHooks, ProcessEventResult } from "./transition.js";
 import type { SlotsDef, MachineContext } from "../slot.js";
@@ -173,7 +173,10 @@ export interface RuntimeConfig<S, E> {
     inner: Effect.Effect<ProcessQueuedResult<S>>,
   ) => Effect.Effect<ProcessQueuedResult<S>>;
   /** Called after self.spawn succeeds — actor tracks children */
-  readonly onChildSpawned?: (childId: string, child: unknown) => Effect.Effect<void>;
+  readonly onChildSpawned?: <ChildState extends { readonly _tag: string }, ChildEvent>(
+    childId: string,
+    child: ActorRef<ChildState, ChildEvent>,
+  ) => Effect.Effect<void>;
   /** Skip registering stop as scope finalizer — actor manages its own lifecycle */
   readonly skipFinalizer?: boolean;
   /** Prefix for child actor IDs in self.spawn. Entity-machine uses `${actorId}/`. Default: no prefix. */
@@ -185,6 +188,10 @@ export interface ProcessQueuedResult<S> {
   readonly shouldStop: boolean;
   readonly stateChanged: boolean;
   readonly result: ProcessEventResult<S>;
+}
+
+interface MutableCell<T> {
+  current: T;
 }
 
 /**
@@ -235,7 +242,7 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
 
   // Pending deferred reply — stored when handler returns Machine.deferReply()
   // Settled by self.reply() from spawn handler
-  const deferredReplyRef: { current: Deferred.Deferred<unknown, NoReplyError> | undefined } = {
+  const deferredReplyRef: MutableCell<Deferred.Deferred<unknown, NoReplyError> | undefined> = {
     current: undefined,
   };
 
@@ -262,7 +269,7 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
               Effect.tap((child) => onChildSpawned(childId, child)),
             )
         : defaultSpawn,
-    reply: (value: unknown) =>
+    reply: <Reply>(value: Reply) =>
       Effect.sync(() => {
         const deferred = deferredReplyRef.current;
         if (deferred !== undefined) {
@@ -275,11 +282,12 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
   };
 
   // State scope for spawn effects
-  const stateScopeRef: { current: Scope.Closeable } = {
+  const stateScopeRef: MutableCell<Scope.Closeable> = {
     current: yield* Scope.make(),
   };
 
   // Shared mutable refs used by both start() and stop()
+  // SAFETY: internal initialization events are consumed only by lifecycle effects and carry the required tag.
   const initEvent = { _tag: INTERNAL_INIT_EVENT } as E;
   const ctx: MachineContext<S, E, MachineRef<E>> = {
     actorId,
@@ -291,7 +299,7 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
   const slots = machine._slots;
 
   // Mutable holder for the loop fiber — needed by stop() and spawn defect signals
-  const loopFiberRef: { current: Fiber.Fiber<void> | undefined } = { current: undefined };
+  const loopFiberRef: MutableCell<Fiber.Fiber<void> | undefined> = { current: undefined };
 
   /** Set the exit deferred exactly once. */
   const setExit = (exit: ActorExit<S>) => Deferred.succeed(exitDeferred, exit).pipe(Effect.asVoid);
@@ -475,7 +483,7 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
     }
     yield* Scope.close(stateScopeRef.current, Exit.void);
     yield* Scope.close(actorScope, Exit.void);
-    yield* setExit(ActorExit.Stopped as ActorExit<S>);
+    yield* setExit(ActorExit.Stopped);
   }).pipe(Effect.asVoid);
 
   // Register stop as scope finalizer so entity teardown cleans up fibers.
@@ -582,36 +590,13 @@ const runtimeEventLoop = Effect.fn("effect-machine.runtime.eventLoop")(function*
   // Postpone buffer — only event-bearing variants, never drain
   const postponed: EventQueued[] = [];
   const hasPostponeRules = machine.postponeRules.length > 0;
-  const processQueued = Effect.fn("effect-machine.runtime.processQueued")(function* (
-    queued: EventQueued,
-  ) {
-    const event = queued.event;
-    const currentState = yield* SubscriptionRef.get(stateRef);
 
-    // Check postpone rules
-    if (hasPostponeRules && shouldPostpone(machine, currentState._tag, event._tag)) {
-      // For call: settle immediately with postponed result, push into buffer for re-processing
-      if (queued._tag === "call") {
-        const postponedResult: ProcessEventResult<{ readonly _tag: string }> = {
-          newState: currentState,
-          previousState: currentState,
-          transitioned: false,
-          lifecycleRan: false,
-          isFinal: false,
-          hasReply: false,
-          deferReply: false,
-          reply: undefined,
-          postponed: true,
-        };
-        yield* Deferred.succeed(queued.reply, postponedResult);
-      }
-      // For sendWait: settle immediately so RPC caller doesn't block
-      if (queued._tag === "sendWait") {
-        yield* Deferred.succeed(queued.done, undefined);
-      }
-      // Buffer event for drain — downcast to send since Deferreds are already settled
-      postponed.push({ _tag: "send", event });
-      const noopResult: ProcessEventResult<S> = {
+  const postponeQueued = Effect.fn("effect-machine.runtime.postponeQueued")(function* (
+    queued: EventQueued,
+    currentState: S,
+  ) {
+    if (queued._tag === "call") {
+      const postponedResult: ProcessEventResult<{ readonly _tag: string }> = {
         newState: currentState,
         previousState: currentState,
         transitioned: false,
@@ -622,7 +607,73 @@ const runtimeEventLoop = Effect.fn("effect-machine.runtime.eventLoop")(function*
         reply: undefined,
         postponed: true,
       };
-      return { shouldStop: false, stateChanged: false, result: noopResult };
+      yield* Deferred.succeed(queued.reply, postponedResult);
+    }
+    if (queued._tag === "sendWait") {
+      yield* Deferred.succeed(queued.done, undefined);
+    }
+    postponed.push({ _tag: "send", event: queued.event });
+    const result: ProcessEventResult<S> = {
+      newState: currentState,
+      previousState: currentState,
+      transitioned: false,
+      lifecycleRan: false,
+      isFinal: false,
+      hasReply: false,
+      deferReply: false,
+      reply: undefined,
+      postponed: true,
+    };
+    return { shouldStop: false, stateChanged: false, result };
+  });
+
+  const settleQueued = Effect.fn("effect-machine.runtime.settleQueued")(function* (
+    queued: EventQueued,
+    event: E,
+    result: ProcessEventResult<S>,
+  ) {
+    switch (queued._tag) {
+      case "call":
+        yield* Deferred.succeed(queued.reply, result);
+        return;
+      case "sendWait":
+        yield* Deferred.succeed(queued.done, undefined);
+        return;
+      case "send":
+        return;
+      case "ask": {
+        if (result.hasReply) {
+          const replySchema = machine._replySchemas?.get(event._tag);
+          if (replySchema === undefined) {
+            yield* Deferred.succeed(queued.reply, result.reply);
+            return;
+          }
+          const decoded = yield* Schema.decodeUnknownEffect(replySchema)(result.reply).pipe(
+            Effect.catch((decodeError) =>
+              Deferred.die(queued.reply, decodeError).pipe(Effect.andThen(Effect.die(decodeError))),
+            ),
+          );
+          yield* Deferred.succeed(queued.reply, decoded);
+          return;
+        }
+        if (result.deferReply && deferredReplyRef !== undefined) {
+          deferredReplyRef.current = queued.reply;
+          return;
+        }
+        yield* Deferred.fail(queued.reply, new NoReplyError({ actorId, eventTag: event._tag }));
+      }
+    }
+  });
+
+  const processQueued = Effect.fn("effect-machine.runtime.processQueued")(function* (
+    queued: EventQueued,
+  ) {
+    const event = queued.event;
+    const currentState = yield* SubscriptionRef.get(stateRef);
+
+    // Check postpone rules
+    if (hasPostponeRules && shouldPostpone(machine, currentState._tag, event._tag)) {
+      return yield* postponeQueued(queued, currentState);
     }
 
     // Lifecycle: onEvent (actor emits @machine.event)
@@ -650,41 +701,7 @@ const runtimeEventLoop = Effect.fn("effect-machine.runtime.eventLoop")(function*
       yield* lifecycle.onStateChange(result, event);
     }
 
-    // Settle reply/done Deferreds
-    switch (queued._tag) {
-      case "call":
-        yield* Deferred.succeed(
-          queued.reply,
-          result as ProcessEventResult<{ readonly _tag: string }>,
-        );
-        break;
-      case "sendWait":
-        yield* Deferred.succeed(queued.done, undefined);
-        break;
-      case "ask":
-        if (result.hasReply) {
-          const replySchema = machine._replySchemas?.get(event._tag);
-          if (replySchema !== undefined) {
-            const decoded = yield* Schema.decodeUnknownEffect(replySchema)(result.reply).pipe(
-              Effect.catch((decodeError) =>
-                Effect.gen(function* () {
-                  yield* Deferred.die(queued.reply, decodeError);
-                  return yield* Effect.die(decodeError);
-                }),
-              ),
-            );
-            yield* Deferred.succeed(queued.reply, decoded);
-          } else {
-            yield* Deferred.succeed(queued.reply, result.reply);
-          }
-        } else if (result.deferReply && deferredReplyRef !== undefined) {
-          // Handler returned Machine.deferReply() — spawn handler will call self.reply()
-          deferredReplyRef.current = queued.reply;
-        } else {
-          yield* Deferred.fail(queued.reply, new NoReplyError({ actorId, eventTag: event._tag }));
-        }
-        break;
-    }
+    yield* settleQueued(queued, event, result);
 
     // Lifecycle: onProcessed (actor publishes to transitionsPubSub)
     if (lifecycle?.onProcessed !== undefined && result.transitioned) {
@@ -749,13 +766,14 @@ const runtimeEventLoop = Effect.fn("effect-machine.runtime.eventLoop")(function*
 
     // Drain: graceful shutdown — process remaining queue then stop
     if (queued._tag === "drain") {
-      yield* shutdown(ActorExit.Stopped as ActorExit<S>);
+      yield* shutdown(ActorExit.Stopped);
       yield* Deferred.succeed(queued.done, undefined);
       return;
     }
 
     // queued is narrowed: drain is handled above, so it's always an event-bearing variant here
     const eventQueued = queued;
+    // SAFETY: createRuntime captures and supplies the machine's R before forking this loop.
     const processInner = processQueued(eventQueued) as Effect.Effect<ProcessQueuedResult<S>>;
     const wrapped =
       wrapProcess !== undefined

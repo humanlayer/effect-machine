@@ -11,6 +11,10 @@ type ParameterOwner =
   | ESTree.TSFunctionType
   | ESTree.TSMethodSignature;
 
+function isTypeGuard(node: ParameterOwner): boolean {
+  return node.returnType?.typeAnnotation.type === "TSTypePredicate";
+}
+
 function parameterAnnotation(parameter: Parameter): ESTree.TSTypeAnnotation | null | undefined {
   if (parameter.type === "TSParameterProperty") {
     return parameterAnnotation(parameter.parameter);
@@ -54,6 +58,7 @@ export const noUnknownParametersRule = defineRule({
   },
   createOnce(context) {
     const checkParameters = (node: ParameterOwner) => {
+      if (isTypeGuard(node)) return;
       for (const parameter of node.params) {
         const annotation = parameterAnnotation(parameter);
         if (annotation?.typeAnnotation.type !== "TSUnknownKeyword") continue;

@@ -87,6 +87,14 @@ export interface EntityMachineOptions<S, E> {
   readonly persistence?: EntityPersistenceConfig;
 }
 
+interface ClusterQueueOptions {
+  maxIdleTime?: Duration.Input;
+  mailboxCapacity?: number | "unbounded";
+  disableFatalDefects?: boolean;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Effect cluster accepts schedules of any output
+  defectRetryPolicy?: Schedule.Schedule<any>;
+}
+
 /**
  * Create an Entity layer that wires a machine to handle RPC calls.
  *
@@ -136,7 +144,7 @@ export const EntityMachine = {
       // ----------------------------------------------------------------
       const persistCtx = yield* hydratePersistence<S, E>(
         persistence,
-        entity as { readonly type: string },
+        entity,
         entityId,
         machine,
         options?.initializeState,
@@ -228,10 +236,12 @@ export const EntityMachine = {
           // eslint-disable-next-line no-constant-condition
           while (true) {
             const request = yield* Queue.take(mailbox);
+            // SAFETY: Envelope.Request is discriminated by its protocol tag at runtime.
             const tag = (request as { readonly tag: string }).tag;
 
             switch (tag) {
               case "Send": {
+                // SAFETY: the Send tag selects the RPC payload carrying machine event E.
                 const event = (request as { readonly payload: { readonly event: E } }).payload
                   .event;
                 // sendWait fails on defect — orDie propagates to toLayerQueue infrastructure
@@ -248,15 +258,17 @@ export const EntityMachine = {
                 const state = yield* runtime.getState;
                 yield* replier.succeed(
                   request,
+                  // SAFETY: the Send RPC success schema is the machine state schema S.
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC success type
                   state as any,
                 );
                 break;
               }
               case "Ask": {
+                // SAFETY: the Ask tag selects the RPC payload carrying machine event E.
                 const event = (request as { readonly payload: { readonly event: E } }).payload
                   .event;
-                const reply = yield* runtime.ask(event);
+                const reply = yield* runtime.ask(event).pipe(Effect.orDie);
 
                 if (journalCtx !== undefined) {
                   yield* persistEvent(journalCtx.adapter, journalCtx.key, versionRef, event);
@@ -266,6 +278,7 @@ export const EntityMachine = {
 
                 yield* replier.succeed(
                   request,
+                  // SAFETY: runtime.ask validates replies against the event's registered reply schema.
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC success type
                   reply as any,
                 );
@@ -275,6 +288,7 @@ export const EntityMachine = {
                 const state = yield* runtime.getState;
                 yield* replier.succeed(
                   request,
+                  // SAFETY: the GetState RPC success schema is the machine state schema S.
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC success type
                   state as any,
                 );
@@ -284,6 +298,7 @@ export const EntityMachine = {
                 // Streaming RPC — respond with SubscriptionRef.changes stream
                 yield* replier.succeed(
                   request,
+                  // SAFETY: WatchState streams values from the machine state SubscriptionRef<S>.
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- streaming RPC success type
                   SubscriptionRef.changes(runtime.stateRef) as any,
                 );
@@ -293,17 +308,11 @@ export const EntityMachine = {
                 break;
             }
           }
-        }) as Effect.Effect<never>;
+        });
     });
 
     // Collect cluster options to forward
-    const clusterOptions: {
-      maxIdleTime?: Duration.Input;
-      mailboxCapacity?: number | "unbounded";
-      disableFatalDefects?: boolean;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      defectRetryPolicy?: Schedule.Schedule<any>;
-    } = {};
+    const clusterOptions: ClusterQueueOptions = {};
     if (options?.maxIdleTime !== undefined) clusterOptions.maxIdleTime = options.maxIdleTime;
     if (options?.mailboxCapacity !== undefined)
       clusterOptions.mailboxCapacity = options.mailboxCapacity;
@@ -312,6 +321,8 @@ export const EntityMachine = {
     if (options?.defectRetryPolicy !== undefined)
       clusterOptions.defectRetryPolicy = options.defectRetryPolicy;
 
+    // SAFETY: Entity.toLayerQueue hides the machine Effect requirements that build retains as R.
+    // eslint-disable-next-line anti-slop/no-chained-type-assertions -- Layer's R parameter is invariant
     return entity.toLayerQueue(
       // orDie: persistence failures during activation are defects (entity retry handles them)
       build.pipe(Effect.orDie),
@@ -328,17 +339,23 @@ export const EntityMachine = {
 // Persistence context
 // ============================================================================
 
-interface PersistenceContext<S> {
-  readonly adapter: PersistenceAdapterService | undefined;
-  readonly key: PersistenceKey;
-  readonly hydratedState: S | undefined;
-  readonly initialVersion: number;
-}
+type PersistenceContext<S> =
+  | {
+      readonly adapter: PersistenceAdapterService;
+      readonly key: PersistenceKey;
+      readonly hydratedState: S | undefined;
+      readonly initialVersion: number;
+    }
+  | {
+      readonly adapter: undefined;
+      readonly key: undefined;
+      readonly hydratedState: undefined;
+      readonly initialVersion: 0;
+    };
 
 const noPersistence: PersistenceContext<never> = {
   adapter: undefined,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- placeholder, never used when adapter is undefined
-  key: undefined as any,
+  key: undefined,
   hydratedState: undefined,
   initialVersion: 0,
 };
@@ -356,13 +373,14 @@ const hydratePersistence = <
   initializeState?: (entityId: string) => S,
 ) =>
   Effect.gen(function* () {
-    if (persistence === undefined) return noPersistence as PersistenceContext<S>;
+    if (persistence === undefined) return noPersistence;
 
     const adapter = yield* PersistenceAdapter;
     const entityType = persistence.machineType ?? entityDef.type;
     const key: PersistenceKey = { entityType, entityId };
 
     // Load snapshot
+    // SAFETY: this persistence key belongs to a machine whose state schema is S.
     const maybeSnapshot = yield* adapter.loadSnapshot(key) as Effect.Effect<
       Option.Option<Snapshot<S>>
     >;
@@ -377,6 +395,7 @@ const hydratePersistence = <
           : machine.initial;
       const snapshotVersion = Option.isSome(maybeSnapshot) ? maybeSnapshot.value.version : 0;
 
+      // SAFETY: journal entries for this persistence key were written from events of E.
       const events = (yield* adapter.loadEvents(key, snapshotVersion)) as ReadonlyArray<
         PersistedEvent<E>
       >;

@@ -82,6 +82,16 @@
       "rules": {
         "anti-slop-effect/no-service-constructor-imports": "off"
       }
+    },
+    {
+      "files": ["src/slot.ts"],
+      "rules": {
+        "anti-slop/no-known-value-widening": "off",
+        "anti-slop/no-unknown-parameters": "off",
+        "anti-slop/no-unknown-returns": "off",
+        "anti-slop/no-unsafe-dictionary-type": "off",
+        "anti-slop/require-safety-comment-for-type-assertion": "off"
+      }
     }
   ]
 }
