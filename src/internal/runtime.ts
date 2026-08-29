@@ -222,8 +222,8 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
 ) {
   const { actorId, hooks, lifecycle } = config;
 
-  // Capture context for fire-and-forget Deferred settlement (runForkWith)
-  const services = yield* Effect.context();
+  // Capture services at allocation so start, stop, and deferred settlement retain them.
+  const services = yield* Effect.context<R>();
   const fork = Effect.runForkWith(services);
 
   // Resources: use cell-provided or allocate fresh
@@ -494,8 +494,8 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
 
   return {
     ...makeHandle(stateRef, stoppedRef, eventQueue, exitDeferred, actorScope),
-    stop,
-    start,
+    stop: stop.pipe(Effect.provide(services)),
+    start: start.pipe(Effect.provide(services)),
   };
 });
 

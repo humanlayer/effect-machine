@@ -772,6 +772,7 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
   },
 ) {
   const lifecycle: Lifecycle<S, E> | undefined = options?.lifecycle;
+  const serviceContext = yield* Effect.context<R>();
 
   // Spawn is cold — initial state from hydrate or machine.initial.
   // Recovery runs during start, not allocate.
@@ -998,7 +999,11 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
     if (implicitSystemScope !== undefined) {
       yield* Scope.close(implicitSystemScope, Exit.void);
     }
-  }).pipe(Effect.withSpan("effect-machine.actor.stop"), Effect.asVoid);
+  }).pipe(
+    Effect.provide(serviceContext),
+    Effect.withSpan("effect-machine.actor.stop"),
+    Effect.asVoid,
+  );
 
   // Track whether hydrate was provided — skip recovery when hydrated
   const isHydrated = options?.initialState !== undefined;
@@ -1078,7 +1083,11 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
     if (currentRuntime !== undefined) {
       yield* currentRuntime.start;
     }
-  }).pipe(Effect.withSpan("effect-machine.actor.start"), Effect.asVoid);
+  }).pipe(
+    Effect.provide(serviceContext),
+    Effect.withSpan("effect-machine.actor.start"),
+    Effect.asVoid,
+  );
 
   return buildActorRefCore(
     id,
