@@ -213,11 +213,10 @@ type LegacySlotHandlers = Record<string, any>;
 
 const eraseDeferred = <A, E>(
   deferred: Deferred.Deferred<A, E>,
-): Deferred.Deferred<unknown, unknown> => {
+): Deferred.Deferred<unknown, unknown> =>
   // SAFETY: pending reply cleanup only fails or deletes the Deferred; it never reads a typed value.
   // eslint-disable-next-line anti-slop/no-chained-type-assertions -- Deferred is invariant in both channels
-  return deferred as unknown as Deferred.Deferred<unknown, unknown>;
-};
+  deferred as unknown as Deferred.Deferred<unknown, unknown>;
 
 const isStatePredicate = <S extends { readonly _tag: string }>(
   value: ((state: S) => boolean) | { readonly _tag: S["_tag"] },
@@ -950,7 +949,10 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
                   ),
                 ),
               ),
-            onChildSpawned: (childId, child) =>
+            onChildSpawned: <ChildState extends { readonly _tag: string }, ChildEvent>(
+              childId: string,
+              child: ActorRef<ChildState, ChildEvent>,
+            ) =>
               Effect.gen(function* () {
                 // SAFETY: the children registry intentionally erases each child's invariant state/event pair.
                 // eslint-disable-next-line anti-slop/no-chained-type-assertions -- ActorRef is invariant

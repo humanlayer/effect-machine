@@ -290,10 +290,9 @@ interface BuiltMachineSchema<D extends Record<string, Schema.Struct.Fields>> {
 const hasTag = (value: unknown): value is TaggedSource =>
   typeof value === "object" && value !== null && "_tag" in value;
 
-const readDynamicField = (source: TaggedSource, key: string) => {
+const readDynamicField = (source: TaggedSource, key: string) =>
   // SAFETY: schema-derived state values are records whose enumerable payload fields are keyed by strings.
-  return (source as DynamicFields)[key];
-};
+  (source as DynamicFields)[key];
 
 const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
   definition: D,
@@ -476,10 +475,9 @@ const createMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(def
  */
 export const State = <const D extends Record<string, Schema.Struct.Fields>>(
   definition: D,
-): MachineStateSchema<D> => {
+): MachineStateSchema<D> =>
   // SAFETY: createMachineSchema builds every constructor and schema member from definition D.
-  return createMachineSchema(definition) as MachineStateSchema<D>;
-};
+  createMachineSchema(definition) as MachineStateSchema<D>;
 
 /**
  * Create a schema-first Event definition.
@@ -510,10 +508,9 @@ export const State = <const D extends Record<string, Schema.Struct.Fields>>(
  */
 const EventImpl = <const D extends Record<string, Schema.Struct.Fields>>(
   definition: D,
-): MachineEventSchema<D> => {
+): MachineEventSchema<D> =>
   // SAFETY: createMachineSchema builds every constructor and schema member from definition D.
-  return createMachineSchema(definition) as MachineEventSchema<D>;
-};
+  createMachineSchema(definition) as MachineEventSchema<D>;
 
 /**
  * Annotate event fields with a reply schema.

@@ -845,7 +845,7 @@ describe("ActorRef", () => {
           readonly run: () => Effect.Effect<string>;
         }
         class LoopTag extends Context.Service<LoopTag, LoopService>()(
-          "effect-machine/test/actor.test/LoopTag",
+          "@humanlayer/effect-machine/test/actor.test/LoopTag",
         ) {}
 
         const LoopLive = Layer.effect(
@@ -950,7 +950,7 @@ describe("ActorRef", () => {
           readonly run: (value: number) => Effect.Effect<void>;
         }
         class LoopTag extends Context.Service<LoopTag, LoopService>()(
-          "effect-machine/test/actor.test/LoopTag",
+          "@humanlayer/effect-machine/test/actor.test/LoopTag",
         ) {}
 
         const LoopLive = Layer.effect(

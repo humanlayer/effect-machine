@@ -6,7 +6,7 @@ import { ActorSystemDefault, ActorSystemService, Event, Machine, State } from ".
 class GreetingService extends Context.Service<
   GreetingService,
   { readonly greet: (name: string) => Effect.Effect<string> }
->()("@humanlayer/effect-machine/test/GreetingService") {}
+>()("@humanlayer/effect-machine/test/services.test/GreetingService") {}
 
 const GreetingState = State({
   Idle: {},
@@ -114,11 +114,13 @@ describe("service requirements", () => {
       const state = yield* actor.awaitFinal;
       expect(state).toEqual(GreetingState.Done({ message: "Hello, Lin!" }));
     }).pipe(
-      Effect.provide(ActorSystemDefault),
       Effect.provide(
-        Layer.succeed(GreetingService, {
-          greet: (name) => Effect.succeed(`Hello, ${name}!`),
-        }),
+        Layer.merge(
+          ActorSystemDefault,
+          Layer.succeed(GreetingService, {
+            greet: (name) => Effect.succeed(`Hello, ${name}!`),
+          }),
+        ),
       ),
     ),
   );
