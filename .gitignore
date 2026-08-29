@@ -173,3 +173,9 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Riptide artifacts (cloud-synced)
+.humanlayer/tasks/
+
+# Riptide artifacts (cloud-synced)
+.humanlayer/tasks/
