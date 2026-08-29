@@ -70,6 +70,10 @@ const streamMachine = Machine.make({
   )
   .final(StreamState.Done);
 
+const GreetingLive = Layer.succeed(GreetingService, {
+  greet: (name) => Effect.succeed(`Hello, ${name}!`),
+});
+
 describe("service requirements", () => {
   it.scopedLive("runs state tasks with services supplied by a Layer", () =>
     Effect.gen(function* () {
@@ -103,6 +107,17 @@ describe("service requirements", () => {
         }),
       ),
     ),
+  );
+
+  it.scopedLive("preserves services provided around actor allocation for start", () =>
+    Effect.gen(function* () {
+      const actor = yield* Machine.spawn(streamMachine).pipe(Effect.provide(GreetingLive));
+      yield* actor.start;
+      yield* actor.send(StreamEvent.Start);
+
+      const state = yield* actor.awaitFinal;
+      expect(state).toEqual(StreamState.Done({ message: "Hello, Grace!" }));
+    }),
   );
 
   it.scopedLive("propagates service requirements through ActorSystem.spawn", () =>
