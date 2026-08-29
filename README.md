@@ -91,7 +91,17 @@ A few things to notice:
 - `.onAny(...)` is a fallback; a specific `.on(...)` wins.
 - `.task(...)` runs work on state entry, sends mapped completion events, and cancels work on state exit.
 
-The builder also supports `.spawn(...)` for long-lived entry effects, `.background(...)` for actor-lifetime effects, `.timeout(...)`, `.postpone(...)`, and `.reenter(...)`.
+## Transitions And Effects
+
+The fluent builder keeps state behavior beside the transitions that make it relevant:
+
+- `.on([State.Draft, State.Review], Event.Cancel, handler)` registers one transition for multiple states; `.from(state, scope => ...)` groups transitions by source state.
+- `.reenter(...)` runs state lifecycle again when a transition keeps the same state tag. Ordinary same-state transitions do not restart state effects or timers.
+- `.spawn(state, handler)` forks state-scoped work that is interrupted on state exit. `.background(handler)` runs for the actor lifetime.
+- `.timeout(state, { duration, event })` starts a state-scoped timer; leaving the state cancels it. Both `duration` and `event` can derive from the entered state.
+- `.postpone(state, event)` buffers matching events and drains them in FIFO order after the next state-tag change.
+
+Use `self.send(...)` from a state effect to feed work back into the machine. State effects can use Effect services and can be asynchronous; transition handlers stay pure.
 
 ## Services And Layers
 
@@ -112,6 +122,33 @@ const program = Effect.gen(function* () {
 
 Transition handlers remain pure and cannot require services or fail. Use a state effect to perform I/O, then map its result to an event with `.task()`. For continuously running work that can send many events, use `.spawn()` and `ctx.self.send(...)`.
 
+## Request And Reply
+
+Declare a reply schema on an event to make it valid for `actor.ask(...)`. Its transition returns `Machine.reply(nextState, value)`, so the reply type is inferred from the schema.
+
+```ts
+const ReceiptEvent = Event({
+  GetReceipt: Event.reply({}, Schema.String),
+  Cancel: {},
+});
+
+const machine = Machine.make({
+  state: CheckoutState,
+  event: ReceiptEvent,
+  initial: CheckoutState.Confirmed({ cartId: "cart_123", receiptId: "rcpt_123" }),
+})
+  .on(CheckoutState.Confirmed, ReceiptEvent.GetReceipt, ({ state }) =>
+    Machine.reply(state, state.receiptId),
+  )
+  .onAny(ReceiptEvent.Cancel, ({ state }) =>
+    CheckoutState.Failed.with(state, { reason: "cancelled" }),
+  );
+
+const receiptId = yield * actor.ask(ReceiptEvent.GetReceipt);
+```
+
+`ask` fails with `NoReplyError` when a handler does not reply and `ActorStoppedError` when the actor stops first. For a reply produced later by state work, return `Machine.deferReply(state)` from the transition and call `self.reply(value)` from a `.spawn(...)` handler.
+
 ## Running Actors
 
 `Machine.spawn` allocates an actor but does not start it. Call `actor.start` to fork the event loop, background effects, and spawn effects. Events sent before `start()` are queued.
@@ -124,6 +161,23 @@ Key actor operations:
 - `ask(event)` returns a typed domain reply from `Event.reply(...)`
 - `waitFor(...)` and `awaitFinal` coordinate with state changes
 - `stop` interrupts now; `drain` processes remaining queued events first
+- `snapshot`, `matches`, and `can` inspect the current actor state
+- `changes` and `transitions` expose state and transition streams; `subscribe` provides a synchronous listener
+
+Use `Machine.scoped` when a local actor should stop with an Effect scope. The scope bridge is explicit, so unrelated scopes never stop an actor by accident.
+
+```ts
+const program = Effect.scoped(
+  Machine.scoped(
+    Effect.gen(function* () {
+      const actor = yield* Machine.spawn(checkoutMachine);
+      yield* actor.start;
+      yield* actor.send(CheckoutEvent.Submit);
+      return yield* actor.awaitFinal;
+    }),
+  ),
+);
+```
 
 For named actors or shared lookup, use an actor system. `system.spawn` auto-starts the actor:
 
@@ -135,6 +189,72 @@ const program = Effect.gen(function* () {
   const actor = yield* system.spawn("checkout-123", checkoutMachine);
   yield* actor.send(CheckoutEvent.Submit);
 }).pipe(Effect.provide(ActorSystemDefault), Effect.provide(PaymentsLive));
+```
+
+`ActorSystemService` also exposes `get(id)`, `stop(id)`, a snapshot `actors` map, an event `Stream`, and `subscribe(...)` for synchronous `ActorSpawned`, `ActorRestarted`, and `ActorStopped` notifications.
+
+## Recovery, Durability, And Supervision
+
+Local actors can resolve an initial state during `start()` and persist committed transitions with lifecycle hooks. `hydrate` takes precedence over recovery, which is useful when a caller already has authoritative state.
+
+```ts
+import { Option } from "effect";
+import { Supervision } from "@humanlayer/effect-machine";
+
+const actor =
+  yield *
+  Machine.spawn(checkoutMachine, {
+    lifecycle: {
+      recovery: {
+        resolve: ({ actorId }) =>
+          storage.load(actorId).pipe(Effect.map(Option.fromNullable), Effect.orDie),
+      },
+      durability: {
+        save: ({ actorId, nextState, event }) =>
+          storage.save(actorId, nextState, event).pipe(Effect.orDie),
+        shouldSave: (nextState, previousState) => nextState._tag !== previousState._tag,
+      },
+    },
+    supervision: Supervision.restart({ maxRestarts: 3, within: "1 minute" }),
+  });
+yield * actor.start;
+```
+
+Recovery receives the actor ID, generation, and machine initial state, and returns `Option<State>`. Durability runs after a transition commits and receives both states, the event, actor ID, and generation. A supervised defect restarts from recovered state when available, otherwise from `machine.initial`; explicit `stop`, `drain`, and final states are terminal. Use `actor.awaitExit` to observe a terminal `Final`, `Stopped`, or `Defect` exit.
+
+## Child Actors
+
+State effects can create children with `self.spawn(id, machine)`. Children created by `.spawn(...)` are state-scoped and automatically stop when their parent leaves that state.
+
+```ts
+const parentMachine = Machine.make({
+  state: ParentState,
+  event: ParentEvent,
+  initial: ParentState.Idle,
+})
+  .on(ParentState.Idle, ParentEvent.Start, () => ParentState.Running)
+  .spawn(ParentState.Running, ({ self }) =>
+    Effect.gen(function* () {
+      const child = yield* self.spawn("worker-1", workerMachine).pipe(Effect.orDie);
+      yield* child.send(WorkerEvent.Start);
+    }),
+  );
+```
+
+Use `.background(...)` when a child should live for the whole actor lifetime. Each actor exposes its direct children through `actor.children` and can look up actors through `actor.system`.
+
+## Inspection
+
+Provide the optional `InspectorService` to observe actor spawn, received events, transitions, tasks, effects, defects, and stops. Built-ins include `consoleInspector`, `collectingInspector`, and `tracingInspector`.
+
+```ts
+import { consoleInspector, InspectorService } from "@humanlayer/effect-machine";
+
+const program = Effect.gen(function* () {
+  const actor = yield* Machine.spawn(checkoutMachine);
+  yield* actor.start;
+  yield* actor.send(CheckoutEvent.Submit);
+}).pipe(Effect.provideService(InspectorService, consoleInspector()));
 ```
 
 ## Testing
@@ -160,6 +280,8 @@ expect(result.states.map((state) => state._tag)).toEqual([
 
 `simulate` and `createTestHarness` run transition logic but do not run `.task()`, `.spawn()`, or `.background()` effects.
 
+For focused assertions, `assertPath`, `assertReaches`, and `assertNeverReaches` are built on the same simulation model. Test state effects with a real actor instead.
+
 ## Cluster
 
 Run the same machine behind `@effect/cluster`:
@@ -175,10 +297,14 @@ const CheckoutEntityLayer = EntityMachine.layer(CheckoutEntity, checkoutMachine,
 });
 ```
 
-Persistence strategies:
+`toEntity` requires a machine made with `Machine.make({ state, event, initial })`, then creates `Send`, `Ask`, `GetState`, and `WatchState` RPCs. `makeEntityActorRef(client, entityId)` wraps that protocol with a typed `send`, `ask`, `snapshot`, `watch`, and `waitFor` API.
 
-- **Snapshot** saves state periodically and restores it on reactivation.
-- **Journal** appends each RPC event and replays it on reactivation.
+Persistence is opt-in and resolves `PersistenceAdapter` from the entity layer's services:
+
+- **Snapshot** is the default. It saves on each state change unless `snapshotSchedule` controls the cadence, then restores on reactivation.
+- **Journal** appends every `Send` and `Ask` event inline, replays events after the latest snapshot, and saves a snapshot when the entity deactivates.
+
+Entity options also include `maxIdleTime`, `mailboxCapacity`, `defectRetryPolicy`, and `disableFatalDefects`, which are forwarded to `@effect/cluster`.
 
 ## License
 
