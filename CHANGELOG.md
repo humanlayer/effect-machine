@@ -1,5 +1,15 @@
 # @humanlayer/effect-machine
 
+## 0.18.0
+
+### Minor Changes
+
+- [`37485f0`](https://github.com/humanlayer/effect-machine/commit/37485f064a30063fc43ec24b63744b384c9a52d3) Thanks [@K-Mistele](https://github.com/K-Mistele)! - Publish the Humanlayer-scoped package, target the latest Effect v4 beta, remove the Effect v3 compatibility exports, and infer Effect service requirements from state effects so applications provide behavior with layers rather than actor-local slot maps.
+
+### Patch Changes
+
+- [#2](https://github.com/humanlayer/effect-machine/pull/2) [`bb1ce43`](https://github.com/humanlayer/effect-machine/commit/bb1ce430bce35bc44db5d1545f66d59d865548ec) Thanks [@K-Mistele](https://github.com/K-Mistele)! - Preserve Effect service dependencies supplied while allocating a local actor, so state effects run correctly when `actor.start` is called later.
+
 ## 0.17.1
 
 ### Patch Changes
