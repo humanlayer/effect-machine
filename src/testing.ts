@@ -8,7 +8,12 @@ import { executeTransition, shouldPostpone } from "./internal/transition.js";
 import { stubSystem } from "./internal/utils.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type MachineInput<S, E, R, SD extends SlotsDef = Record<string, never>> =
+type MachineInput<
+  S extends { readonly _tag: string },
+  E extends { readonly _tag: string },
+  R,
+  SD extends SlotsDef = Record<string, never>,
+> =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Machine<S, E, R, any, any, SD>;
 

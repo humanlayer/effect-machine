@@ -206,7 +206,7 @@ interface ProcessEventResult<S> {
 const unsub = system.subscribe((event) => console.log(event._tag, event.id));
 
 // Sync snapshot of all registered actors
-const actors: ReadonlyMap<string, ActorRef> = system.actors;
+const actors: ReadonlyMap<string, ActorHandle> = system.actors;
 
 // Async stream (late subscribers miss prior events)
 system.events.pipe(Stream.take(10), Stream.runCollect);
@@ -251,19 +251,19 @@ import { toEntity, EntityMachine, PersistenceAdapter } from "@humanlayer/effect-
 
 const OrderEntity = toEntity(orderMachine, { type: "Order" });
 
-const OrderEntityLayer = EntityMachine.layer(OrderEntity, orderMachine, {
+const OrderEntityLayer = EntityMachine.layer(OrderEntity, {
   initializeState: (entityId) => OrderState.Pending({ orderId: entityId }),
   persistence: { strategy: "journal" }, // or "snapshot" (default)
 });
 ```
 
-| Export                                        | Purpose                                                             |
-| --------------------------------------------- | ------------------------------------------------------------------- |
-| `toEntity(machine, { type })`                 | Generate `Entity` definition with Send/Ask/GetState/WatchState RPCs |
-| `EntityMachine.layer(entity, machine, opts?)` | Wire machine to cluster Entity layer                                |
-| `makeEntityActorRef(client, id)`              | Typed client wrapper (send/ask/snapshot/watch/waitFor)              |
-| `PersistenceAdapter`                          | Service tag for storage backend                                     |
-| `makeInMemoryPersistenceAdapter`              | In-memory adapter for testing                                       |
+| Export                                   | Purpose                                                             |
+| ---------------------------------------- | ------------------------------------------------------------------- |
+| `toEntity(machine, { type })`            | Generate `Entity` definition with Send/Ask/GetState/WatchState RPCs |
+| `EntityMachine.layer(entity, opts?)`     | Wire the entity's machine to a truthful cluster Layer               |
+| `makeEntityActorRef(entity, client, id)` | Typed client wrapper; decodes Ask replies and preserves errors      |
+| `PersistenceAdapter`                     | Service tag for storage backend                                     |
+| `makeInMemoryPersistenceAdapter`         | In-memory adapter for testing                                       |
 
 **Persistence strategies:**
 

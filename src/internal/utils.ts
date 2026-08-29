@@ -140,8 +140,8 @@ export const getTag = (
   // Fallback: instantiate (Data.taggedEnum compatibility)
   // Try zero-arg first, then empty object for record constructors
   try {
-    // SAFETY: the remaining union member is a tagged constructor callable without payload data.
-    return (constructorOrValue as () => { _tag: string })()._tag;
+    // The _tag check leaves only the callable constructor branch.
+    return constructorOrValue()._tag;
   } catch {
     // SAFETY: Data tagged record constructors accept an empty record when zero-argument invocation fails.
     return (constructorOrValue as (args: Record<string, never>) => { _tag: string })({})._tag;

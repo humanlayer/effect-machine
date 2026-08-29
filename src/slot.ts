@@ -299,7 +299,7 @@ export const define = <D extends SlotsDef>(definitions: D): SlotsSchema<D> => {
   }
 
   const buildUnion = <T>(schemas: Array<Schema.Schema<any>>): Schema.Codec<T> =>
-    schemas.length === 0 ? (Schema.Never as any) : (Schema.Union(schemas as any) as any);
+    schemas.length === 0 ? Schema.Never : (Schema.Union(schemas as any) as any);
 
   const requestSchema = buildUnion<SlotRequest<D>>(requestSchemas);
   const resultSchema = buildUnion<SlotResult<D>>(resultSchemas);

@@ -103,6 +103,18 @@ The fluent builder keeps state behavior beside the transitions that make it rele
 
 Use `self.send(...)` from a state effect to feed work back into the machine. State effects can use Effect services and can be asynchronous; transition handlers stay pure.
 
+Methods that can add Effect requirements—`.spawn(...)`, `.task(...)`, `.timeout(...)`, and `.background(...)`—are copy-on-write. Always use their returned machine. This keeps an earlier alias truthful and unchanged:
+
+```ts
+const base = Machine.make({ state, event, initial });
+const withWorker = base.spawn(State.Running, worker);
+
+base.spawnEffects.length; // 0
+withWorker.spawnEffects.length; // 1
+```
+
+State-effect contexts expose an honest lifecycle event union: initial effects receive `$init`, while effects started after a state transition receive `$enter`.
+
 ## Services And Layers
 
 New machines use Effect's service system for dependencies, not actor-local slot maps. Define a dependency with `Context.Service` (the Effect v4 replacement for `ServiceMap.Service`), access it with `yield*` inside a state effect, and provide an implementation with a `Layer` at the program boundary.
@@ -206,7 +218,7 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(ActorSystemDefault), Effect.provide(PaymentsLive));
 ```
 
-`ActorSystemService` also exposes `get(id)`, `stop(id)`, a snapshot `actors` map, an event `Stream`, and `subscribe(...)` for synchronous `ActorSpawned`, `ActorRestarted`, and `ActorStopped` notifications.
+`ActorSystemService` also exposes `get(id)`, `stop(id)`, a snapshot `actors` map, an event `Stream`, and `subscribe(...)` for synchronous `ActorSpawned`, `ActorRestarted`, and `ActorStopped` notifications. Typed `spawn` returns a full `ActorRef<State, Event>`. Heterogeneous lookups, maps, child collections, and system events expose `ActorHandle`, which supports lifecycle and read-only observation but cannot accept an event without a type witness.
 
 ## Recovery, Durability, And Supervision
 
@@ -306,13 +318,13 @@ import { EntityMachine, toEntity } from "@humanlayer/effect-machine/cluster";
 
 const CheckoutEntity = toEntity(checkoutMachine, { type: "Checkout" });
 
-const CheckoutEntityLayer = EntityMachine.layer(CheckoutEntity, checkoutMachine, {
+const CheckoutEntityLayer = EntityMachine.layer(CheckoutEntity, {
   initializeState: (entityId) => CheckoutState.ReviewingCart({ cartId: entityId, totalCents: 0 }),
   persistence: { strategy: "journal" },
 });
 ```
 
-`toEntity` requires a machine made with `Machine.make({ state, event, initial })`, then creates `Send`, `Ask`, `GetState`, and `WatchState` RPCs. `makeEntityActorRef(client, entityId)` wraps that protocol with a typed `send`, `ask`, `snapshot`, `watch`, and `waitFor` API.
+`toEntity` requires a machine made with `Machine.make({ state, event, initial })`, then returns a machine-owned entity with canonical `Send`, `Ask`, `GetState`, and `WatchState` RPCs. `EntityMachine.layer(entity, options?)` uses the machine carried by that entity, preventing protocol/machine mismatches. `makeEntityActorRef(entity, client, entityId)` wraps the protocol with typed `send`, `ask`, `snapshot`, `watch`, and `waitFor`; remote Ask values are decoded with the event's reply schema and client transport errors remain in each operation's error channel.
 
 Persistence is opt-in and resolves `PersistenceAdapter` from the entity layer's services:
 

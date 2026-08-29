@@ -58,12 +58,14 @@ export type {
   Durability,
   DurabilityCommit,
   Lifecycle,
+  LifecycleEvent,
 } from "./machine.js";
 
 // Actor types and system
 export type {
   ActorRef,
   ActorRefSync,
+  ActorHandle,
   ActorSystemService as ActorSystem,
   ProcessEventResult,
   SystemEvent,

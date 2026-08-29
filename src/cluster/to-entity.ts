@@ -13,11 +13,11 @@ import { MissingSchemaError } from "../errors.js";
 /**
  * Options for toEntity.
  */
-export interface ToEntityOptions {
+export interface ToEntityOptions<EntityType extends string = string> {
   /**
    * Entity type name (e.g., "Order", "User")
    */
-  readonly type: string;
+  readonly type: EntityType;
 }
 
 /**
@@ -27,11 +27,46 @@ export interface ToEntityOptions {
  * - `Ask` - Send event and get domain reply (typed via Event.reply() schemas)
  * - `GetState` - Get current state
  */
-export type EntityRpcs<StateSchema extends Schema.Top, EventSchema extends Schema.Top> = readonly [
-  Rpc.Rpc<"Send", Schema.Struct<{ readonly event: EventSchema }>, StateSchema>,
-  Rpc.Rpc<"Ask", Schema.Struct<{ readonly event: EventSchema }>, typeof Schema.Unknown>,
-  Rpc.Rpc<"GetState", typeof Schema.Void, StateSchema>,
-];
+const makeEntityRpcs = <StateSchema extends Schema.Top, EventSchema extends Schema.Top>(
+  stateSchema: StateSchema,
+  eventSchema: EventSchema,
+) =>
+  [
+    Rpc.make("Send", {
+      payload: { event: eventSchema },
+      success: stateSchema,
+    }),
+    Rpc.make("Ask", {
+      payload: { event: eventSchema },
+      success: Schema.Unknown,
+    }),
+    Rpc.make("GetState", {
+      success: stateSchema,
+    }),
+    Rpc.make("WatchState", {
+      success: stateSchema,
+      stream: true,
+    }),
+  ] as const;
+
+/** Canonical Send / Ask / GetState / WatchState protocol for machine entities. */
+export type EntityRpcs<StateSchema extends Schema.Top, EventSchema extends Schema.Top> = ReturnType<
+  typeof makeEntityRpcs<StateSchema, EventSchema>
+>;
+
+/** Entity definition tied to the exact machine and schemas that created it. */
+export interface MachineEntity<
+  State extends { readonly _tag: string },
+  Event extends { readonly _tag: string },
+  R,
+  EntityType extends string,
+> extends Entity.Entity<EntityType, EntityRpcs<Schema.Codec<State>, Schema.Codec<Event>>[number]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- schema-definition parameters are carried opaquely by MachineEntity
+  readonly machine: Machine<State, Event, R, any, any, any>;
+  readonly stateSchema: Schema.Codec<State>;
+  readonly eventSchema: Schema.Codec<Event>;
+  readonly rpcs: EntityRpcs<Schema.Codec<State>, Schema.Codec<Event>>;
+}
 
 /**
  * Generate an Entity definition from a machine.
@@ -68,11 +103,12 @@ export const toEntity = <
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
+  const EntityType extends string,
 >(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Schema fields need wide acceptance
   machine: Machine<S, E, R, any, any, any>,
-  options: ToEntityOptions,
-) => {
+  options: ToEntityOptions<EntityType>,
+): MachineEntity<S, E, R, EntityType> => {
   const stateSchema = machine.stateSchema;
   const eventSchema = machine.eventSchema;
 
@@ -80,21 +116,13 @@ export const toEntity = <
     throw new MissingSchemaError({ operation: "toEntity" });
   }
 
-  return Entity.make(options.type, [
-    Rpc.make("Send", {
-      payload: { event: eventSchema },
-      success: stateSchema,
-    }),
-    Rpc.make("Ask", {
-      payload: { event: eventSchema },
-      success: Schema.Unknown,
-    }),
-    Rpc.make("GetState", {
-      success: stateSchema,
-    }),
-    Rpc.make("WatchState", {
-      success: stateSchema,
-      stream: true,
-    }),
-  ]);
+  const stateCodec = Schema.make<Schema.Codec<S>>(stateSchema.ast);
+  const eventCodec = Schema.make<Schema.Codec<E>>(eventSchema.ast);
+  const rpcs = makeEntityRpcs(stateCodec, eventCodec);
+  return Object.assign(Entity.make(options.type, rpcs), {
+    machine,
+    stateSchema: stateCodec,
+    eventSchema: eventCodec,
+    rpcs,
+  });
 };

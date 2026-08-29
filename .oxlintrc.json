@@ -48,7 +48,7 @@
     "no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
     "typescript/no-unsafe-type-assertion": "off",
     "typescript/no-unnecessary-type-parameters": "off",
-    "typescript/no-unnecessary-type-assertion": "off",
+    "typescript/no-unnecessary-type-assertion": "error",
     "typescript/consistent-return": "off",
     "typescript/no-unnecessary-type-arguments": "off",
     "typescript/unbound-method": "off",
@@ -66,13 +66,13 @@
     {
       "files": ["**/*.test.ts"],
       "rules": {
-        "anti-slop/no-chained-type-assertions": "off",
         "anti-slop/no-known-value-widening": "off",
         "anti-slop/no-object-parameters": "off",
         "anti-slop/no-unknown-type-aliases": "off",
         "anti-slop/no-unsafe-dictionary-type": "off",
         "anti-slop/require-safety-comment-for-type-assertion": "off",
         "typescript/no-non-null-assertion": "off",
+        "typescript/no-unnecessary-type-assertion": "off",
         "typescript/no-explicit-any": "off"
       }
     },

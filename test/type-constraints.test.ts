@@ -14,6 +14,7 @@
  */
 import { Effect, Schema, Context } from "effect";
 import { Machine, State, Event, Slot } from "../src/index.js";
+import type { ActorHandle } from "../src/index.js";
 import type { ProvideSlots } from "../src/slot.js";
 
 const MyState = State({
@@ -86,7 +87,14 @@ const _test5 = Machine.make({
   .on(MyState.Idle, MyEvent.Start, () => MyState.Loading({ url: "/" }))
   .spawn(MyState.Loading, () => MyService.pipe(Effect.asVoid));
 
-const _test5RequiresService: Effect.Effect<unknown, never, MyService> = Machine.spawn(_test5);
+type EffectRequirements<Value> =
+  Value extends Effect.Effect<infer _A, infer _E, infer R> ? R : never;
+type Assert<Condition extends true> = Condition;
+
+const _test5Spawn = Machine.spawn(_test5);
+type _Test5RequiresService = Assert<
+  MyService extends EffectRequirements<typeof _test5Spawn> ? true : false
+>;
 
 // Test 6: task handler can require a service, which also propagates to Machine.spawn
 const _test6 = Machine.make({
@@ -97,7 +105,32 @@ const _test6 = Machine.make({
   onSuccess: () => MyEvent.Complete,
 });
 
-const _test6RequiresService: Effect.Effect<unknown, never, MyService> = Machine.spawn(_test6);
+const _test6Spawn = Machine.spawn(_test6);
+type _Test6RequiresService = Assert<
+  MyService extends EffectRequirements<typeof _test6Spawn> ? true : false
+>;
+
+// Test 6b: requirement-growing methods do not mutate the type of an earlier alias
+const _test6bBase = Machine.make({
+  state: MyState,
+  event: MyEvent,
+  initial: MyState.Idle,
+});
+const _test6bWithService = _test6bBase.background(() => MyService.pipe(Effect.asVoid));
+const _test6bBaseSpawn = Machine.spawn(_test6bBase);
+const _test6bWithServiceSpawn = Machine.spawn(_test6bWithService);
+type _Test6bBaseStillServiceFree = Assert<
+  MyService extends EffectRequirements<typeof _test6bBaseSpawn> ? false : true
+>;
+type _Test6bRequiresService = Assert<
+  MyService extends EffectRequirements<typeof _test6bWithServiceSpawn> ? true : false
+>;
+
+// Heterogeneous lookup is intentionally eventless; exact spawn results remain ActorRef.
+const _actorHandleCannotSend = (handle: ActorHandle) => {
+  // @ts-expect-error - ActorHandle has no event type witness
+  handle.send(MyEvent.Start);
+};
 
 // ============================================================================
 // Reply Schema Type Constraints
@@ -122,6 +155,23 @@ const _test7 = Machine.make({
 }).on(ReplyState.Active, ReplyEvent.GetCount, ({ state }) =>
   Machine.reply(ReplyState.Active({ count: state.count }), state.count),
 );
+
+// Test 7b: onAny supports reply-bearing events with the same contract as on
+const _test7b = Machine.make({
+  state: ReplyState,
+  event: ReplyEvent,
+  initial: ReplyState.Active({ count: 0 }),
+}).onAny(ReplyEvent.GetCount, ({ state }) =>
+  Machine.reply(state, state._tag === "Active" ? state.count : 0),
+);
+
+// Test 7c: onAny requires Machine.reply() for reply-bearing events
+const _test7c = Machine.make({
+  state: ReplyState,
+  event: ReplyEvent,
+  initial: ReplyState.Active({ count: 0 }),
+  // @ts-expect-error - reply-bearing onAny handler requires Machine.reply()
+}).onAny(ReplyEvent.GetCount, ({ state }) => state);
 
 // Test 8: Handler for reply-bearing event CANNOT return plain state
 const _test8 = Machine.make({

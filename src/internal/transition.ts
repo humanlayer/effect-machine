@@ -10,7 +10,14 @@
  */
 import { Cause, Effect, Exit, Scope } from "effect";
 
-import type { Machine, MachineRef, Transition, SpawnEffect, HandlerContext } from "../machine.js";
+import type {
+  Machine,
+  MachineRef,
+  Transition,
+  SpawnEffect,
+  HandlerContext,
+  LifecycleEvent,
+} from "../machine.js";
 import type { ActorSystemService } from "../actor.js";
 import type { SlotsDef, MachineContext } from "../slot.js";
 import { isEffect, isReplyResult, isDeferReplyResult, INTERNAL_ENTER_EVENT } from "./utils.js";
@@ -61,7 +68,7 @@ export const runTransitionHandler = Effect.fn("effect-machine.runTransitionHandl
   const slots = machine._slots;
 
   const handlerCtx: HandlerContext<S, E, SD> = { state, event, slots };
-  const raw = transition.handler(handlerCtx);
+  const raw = transition.run(handlerCtx);
 
   const resolved = isEffect(raw)
     ? yield* (
@@ -166,7 +173,7 @@ export interface ProcessEventHooks<S, E> {
   /** Called after transition completes */
   readonly onTransition?: (from: S, to: S, event: E) => Effect.Effect<void>;
   /** Called when a transition handler or spawn effect fails with a defect */
-  readonly onError?: (info: ProcessEventError<S, E>) => Effect.Effect<void>;
+  readonly onError?: (info: ProcessEventError<S, E | LifecycleEvent>) => Effect.Effect<void>;
   /** Called when a forked spawn fiber defects — signals the runtime to set exitDeferred */
   readonly onSpawnDefect?: (cause: Cause.Cause<unknown>) => Effect.Effect<void>;
 }
@@ -310,8 +317,7 @@ export const processEventCore = Effect.fn("effect-machine.processEventCore")(fun
     }
 
     // Run spawn effects for new state
-    // SAFETY: internal lifecycle events are consumed only by state effects and carry the required tag.
-    const enterEvent = { _tag: INTERNAL_ENTER_EVENT } as E;
+    const enterEvent = { _tag: INTERNAL_ENTER_EVENT } as const;
     yield* runSpawnEffects(
       machine,
       newState,
@@ -352,16 +358,22 @@ export const runSpawnEffects = Effect.fn("effect-machine.runSpawnEffects")(funct
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   machine: Machine<S, E, R, any, any, SD>,
   state: S,
-  event: E,
+  event: E | LifecycleEvent,
   self: MachineRef<E>,
   stateScope: Scope.Closeable,
   system: ActorSystemService,
   actorId: string,
-  onError?: (info: ProcessEventError<S, E>) => Effect.Effect<void>,
+  onError?: (info: ProcessEventError<S, E | LifecycleEvent>) => Effect.Effect<void>,
   onSpawnDefect?: (cause: Cause.Cause<unknown>) => Effect.Effect<void>,
 ) {
   const spawnEffects = findSpawnEffects(machine, state._tag);
-  const ctx: MachineContext<S, E, MachineRef<E>> = { actorId, state, event, self, system };
+  const ctx: MachineContext<S, E | LifecycleEvent, MachineRef<E>> = {
+    actorId,
+    state,
+    event,
+    self,
+    system,
+  };
   const slots = machine._slots;
   const reportError = onError;
   const defectSignal = onSpawnDefect;
@@ -369,7 +381,7 @@ export const runSpawnEffects = Effect.fn("effect-machine.runSpawnEffects")(funct
   for (const spawnEffect of spawnEffects) {
     // Fork the spawn effect into the state scope - interrupted when scope closes
     const effect = spawnEffect
-      .handler({
+      .run({
         actorId,
         state,
         event,

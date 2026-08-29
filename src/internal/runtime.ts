@@ -151,6 +151,8 @@ export interface RuntimeLifecycleHooks<S, E> {
 /** @internal */
 export interface RuntimeConfig<S, E> {
   readonly actorId: string;
+  /** Runtime initial state, used for hydration/recovery without cloning the machine. */
+  readonly initialState?: S;
   readonly hooks?: ProcessEventHooks<S, E>;
   /**
    * Cell-owned resources. When provided, the runtime uses the cell's stateRef,
@@ -221,14 +223,14 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
   config: RuntimeConfig<S, E>,
 ) {
   const { actorId, hooks, lifecycle } = config;
+  const initialState = config.initialState ?? machine.initial;
 
   // Capture services at allocation so start, stop, and deferred settlement retain them.
   const services = yield* Effect.context<R>();
   const fork = Effect.runForkWith(services);
 
   // Resources: use cell-provided or allocate fresh
-  const stateRef =
-    config.cellResources?.stateRef ?? (yield* SubscriptionRef.make<S>(machine.initial));
+  const stateRef = config.cellResources?.stateRef ?? (yield* SubscriptionRef.make<S>(initialState));
   const stoppedRef = config.cellResources?.stoppedRef ?? (yield* Ref.make(false));
   const eventQueue =
     config.cellResources?.eventQueue ??
@@ -287,11 +289,10 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
   };
 
   // Shared mutable refs used by both start() and stop()
-  // SAFETY: internal initialization events are consumed only by lifecycle effects and carry the required tag.
-  const initEvent = { _tag: INTERNAL_INIT_EVENT } as E;
-  const ctx: MachineContext<S, E, MachineRef<E>> = {
+  const initEvent = { _tag: INTERNAL_INIT_EVENT } as const;
+  const ctx: MachineContext<S, E | typeof initEvent, MachineRef<E>> = {
     actorId,
-    state: machine.initial,
+    state: initialState,
     event: initEvent,
     self,
     system,
@@ -323,7 +324,7 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
       const fiber = yield* bg
         .handler({
           actorId,
-          state: machine.initial,
+          state: initialState,
           event: initEvent,
           self,
           slots,
@@ -337,7 +338,7 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
     // For unsupervised actors this fails createActor (correct: don't register dead actors).
     // For supervised actors (Step 3), the supervision loop will catch and restart.
     if (lifecycle?.onInitialSpawnEffects !== undefined) {
-      yield* lifecycle.onInitialSpawnEffects(machine.initial);
+      yield* lifecycle.onInitialSpawnEffects(initialState);
     }
     // Note: onSpawnDefect for initial spawn fibers that defect asynchronously (after forking).
     // If they defect later, this signals through exitDeferred and interrupts the loop.
@@ -355,7 +356,7 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
       );
     yield* runSpawnEffects(
       machine,
-      machine.initial,
+      initialState,
       initEvent,
       self,
       stateScopeRef.current,
@@ -377,12 +378,12 @@ export const createRuntime = Effect.fn("effect-machine.runtime.create")(function
     );
 
     // Check if initial state is final — if so, clean up and signal done
-    if (machine.finalStates.has(machine.initial._tag)) {
-      if (lifecycle?.onFinal !== undefined) yield* lifecycle.onFinal(machine.initial);
+    if (machine.finalStates.has(initialState._tag)) {
+      if (lifecycle?.onFinal !== undefined) yield* lifecycle.onFinal(initialState);
       yield* Ref.set(stoppedRef, true);
       yield* Scope.close(stateScopeRef.current, Exit.void);
       yield* Scope.close(actorScope, Exit.void);
-      yield* setExit(ActorExit.Final(machine.initial));
+      yield* setExit(ActorExit.Final(initialState));
       yield* Deferred.succeed(startDeferred, undefined);
       return;
     }

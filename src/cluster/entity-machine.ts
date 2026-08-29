@@ -12,7 +12,7 @@
  * @module
  */
 import { Entity } from "effect/unstable/cluster";
-import type { Envelope } from "effect/unstable/cluster";
+import type { Envelope, Sharding } from "effect/unstable/cluster";
 import type { Rpc } from "effect/unstable/rpc";
 import {
   Clock,
@@ -22,6 +22,7 @@ import {
   Option,
   Queue,
   Ref,
+  type Schema,
   type Schedule,
   Stream,
   SubscriptionRef,
@@ -40,6 +41,12 @@ import {
   type PersistedEvent,
   type Snapshot,
 } from "./persistence.js";
+import type { EntityRpcs, MachineEntity } from "./to-entity.js";
+
+const matchesRpc = <Protocol extends Rpc.Any, Selected extends Protocol>(
+  rpc: Selected,
+  request: Envelope.Request<Protocol>,
+): request is Envelope.Request<Protocol> & Envelope.Request<Selected> => request.tag === rpc._tag;
 
 /**
  * Options for EntityMachine.layer
@@ -87,6 +94,22 @@ export interface EntityMachineOptions<S, E> {
   readonly persistence?: EntityPersistenceConfig;
 }
 
+type EntityOptionsWithoutPersistence<S, E> = Omit<EntityMachineOptions<S, E>, "persistence"> & {
+  readonly persistence?: undefined;
+};
+
+type EntityOptionsWithPersistence<S, E> = Omit<EntityMachineOptions<S, E>, "persistence"> & {
+  readonly persistence: EntityPersistenceConfig;
+};
+
+type EntityLayerRequirements<R, Persistence> = R | Persistence | Sharding.Sharding;
+
+type EntityLayer<R, Persistence> = Layer.Layer<
+  never,
+  never,
+  EntityLayerRequirements<R, Persistence>
+>;
+
 interface ClusterQueueOptions {
   maxIdleTime?: Duration.Input;
   mailboxCapacity?: number | "unbounded";
@@ -106,230 +129,224 @@ interface ClusterQueueOptions {
  * ```ts
  * const OrderEntity = toEntity(orderMachine, { type: "Order" })
  *
- * const OrderEntityLayer = EntityMachine.layer(OrderEntity, orderMachine, {
+ * const OrderEntityLayer = EntityMachine.layer(OrderEntity, {
  *   initializeState: (entityId) => OrderState.Pending({ orderId: entityId }),
  * })
  * ```
  */
-export const EntityMachine = {
-  layer: <
-    S extends { readonly _tag: string },
-    E extends { readonly _tag: string },
-    R,
-    EntityType extends string,
-    Rpcs extends Rpc.Any,
-  >(
-    entity: Entity.Entity<EntityType, Rpcs>,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Machine type params need wide acceptance
-    machine: Machine<S, E, R, any, any, any>,
-    options?: EntityMachineOptions<S, E>,
-  ): Layer.Layer<never, never, R> => {
-    const persistence = options?.persistence;
+function layer<
+  S extends { readonly _tag: string },
+  E extends { readonly _tag: string },
+  R,
+  EntityType extends string,
+>(
+  entity: MachineEntity<S, E, R, EntityType>,
+  options?: EntityOptionsWithoutPersistence<S, E>,
+): EntityLayer<R, never>;
+function layer<
+  S extends { readonly _tag: string },
+  E extends { readonly _tag: string },
+  R,
+  EntityType extends string,
+>(
+  entity: MachineEntity<S, E, R, EntityType>,
+  options: EntityOptionsWithPersistence<S, E>,
+): EntityLayer<R, PersistenceAdapter>;
+function layer<
+  S extends { readonly _tag: string },
+  E extends { readonly _tag: string },
+  R,
+  EntityType extends string,
+>(
+  entity: MachineEntity<S, E, R, EntityType>,
+  options: EntityMachineOptions<S, E>,
+): EntityLayer<R, PersistenceAdapter>;
+function layer<
+  S extends { readonly _tag: string },
+  E extends { readonly _tag: string },
+  R,
+  EntityType extends string,
+>(entity: MachineEntity<S, E, R, EntityType>, options?: EntityMachineOptions<S, E>) {
+  type Rpcs = EntityRpcs<Schema.Codec<S>, Schema.Codec<E>>[number];
+  const machine = entity.machine;
+  const persistence = options?.persistence;
 
-    // Build function receives (queue, replier) from Entity.toLayerQueue
-    const build = Effect.gen(function* () {
-      // Get entity ID from context (provided by Entity activation)
-      const entityId = yield* Effect.serviceOption(Entity.CurrentAddress).pipe(
-        Effect.map((opt) => (opt._tag === "Some" ? opt.value.entityId : "")),
-      );
+  // Build function receives (queue, replier) from Entity.toLayerQueue
+  const build = Effect.gen(function* () {
+    // Get entity ID from context (provided by Entity activation)
+    const entityId = yield* Effect.serviceOption(Entity.CurrentAddress).pipe(
+      Effect.map((opt) => (opt._tag === "Some" ? opt.value.entityId : "")),
+    );
 
-      // Resolve actor system from context, or create implicit one
-      const existingSystem = yield* Effect.serviceOption(ActorSystemTag);
-      const system: ActorSystemService = Option.isSome(existingSystem)
-        ? existingSystem.value
-        : yield* makeSystem();
+    // Resolve actor system from context, or create implicit one
+    const existingSystem = yield* Effect.serviceOption(ActorSystemTag);
+    const system: ActorSystemService = Option.isSome(existingSystem)
+      ? existingSystem.value
+      : yield* makeSystem();
 
-      // ----------------------------------------------------------------
-      // Persistence: hydration
-      // ----------------------------------------------------------------
-      const persistCtx = yield* hydratePersistence<S, E>(
-        persistence,
-        entity,
-        entityId,
-        machine,
-        options?.initializeState,
-      );
+    // ----------------------------------------------------------------
+    // Persistence: hydration
+    // ----------------------------------------------------------------
+    const persistCtx = yield* hydratePersistence<S, E>(
+      persistence,
+      entity,
+      entityId,
+      machine,
+      options?.initializeState,
+    );
 
-      // Compute final initial state: hydrated > initializeState > machine.initial
-      const initialState =
-        persistCtx.hydratedState ??
-        (options?.initializeState !== undefined ? options.initializeState(entityId) : undefined);
+    // Compute final initial state: hydrated > initializeState > machine.initial
+    const initialState =
+      persistCtx.hydratedState ??
+      (options?.initializeState !== undefined ? options.initializeState(entityId) : undefined);
 
-      const machineWithState =
-        initialState !== undefined
-          ? Object.create(machine, {
-              initial: { value: initialState, enumerable: true },
-            })
-          : machine;
+    // Version tracking
+    const versionRef = yield* Ref.make(persistCtx.initialVersion);
 
-      // Version tracking
-      const versionRef = yield* Ref.make(persistCtx.initialVersion);
+    // Cell-owned resources — stable identity for this entity activation
+    const computedInitial = initialState ?? machine.initial;
+    const stateRef = yield* SubscriptionRef.make(computedInitial);
+    const stoppedRef = yield* Ref.make(false);
+    const eventQueue = yield* Queue.unbounded<RuntimeQueuedEvent<E>>();
 
-      // Cell-owned resources — stable identity for this entity activation
-      const computedInitial = initialState ?? machine.initial;
-      const stateRef = yield* SubscriptionRef.make(computedInitial);
-      const stoppedRef = yield* Ref.make(false);
-      const eventQueue = yield* Queue.unbounded<RuntimeQueuedEvent<E>>();
+    // Create runtime kernel — single queue, sequential processing
+    const runtime = yield* createRuntime(machine, system, {
+      actorId: entityId,
+      initialState: computedInitial,
+      hooks: options?.hooks,
+      childIdPrefix: `${entityId}/`,
+      cellResources: { stateRef, stoppedRef, eventQueue },
+    });
+    yield* runtime.start;
 
-      // Create runtime kernel — single queue, sequential processing
-      const runtime = yield* createRuntime(machineWithState, system, {
-        actorId: entityId,
-        hooks: options?.hooks,
-        childIdPrefix: `${entityId}/`,
-        cellResources: { stateRef, stoppedRef, eventQueue },
-      });
-      yield* runtime.start;
+    // ----------------------------------------------------------------
+    // Persistence: snapshot scheduling
+    // ----------------------------------------------------------------
+    if (persistCtx.adapter !== undefined) {
+      const { adapter: pAdapter, key } = persistCtx;
+      const strategy = persistence?.strategy ?? "snapshot";
+      const schedule = persistence?.snapshotSchedule;
 
-      // ----------------------------------------------------------------
-      // Persistence: snapshot scheduling
-      // ----------------------------------------------------------------
-      if (persistCtx.adapter !== undefined) {
-        const { adapter: pAdapter, key } = persistCtx;
-        const strategy = persistence?.strategy ?? "snapshot";
-        const schedule = persistence?.snapshotSchedule;
-
-        if (strategy === "snapshot") {
-          // Snapshot-only mode: background scheduler is safe (no journal to tear against)
-          yield* SubscriptionRef.changes(runtime.stateRef).pipe(
-            schedule !== undefined ? Stream.schedule(schedule) : (s: Stream.Stream<S>) => s,
-            Stream.runForEach((state) =>
-              Effect.gen(function* () {
-                const version = yield* Ref.get(versionRef);
-                const now = yield* Clock.currentTimeMillis;
-                yield* pAdapter.saveSnapshot(key, {
-                  state,
-                  version,
-                  timestamp: now,
-                } satisfies Snapshot<S>);
-              }).pipe(Effect.catch(() => Effect.void)),
-            ),
-            Effect.forkScoped,
-          );
-        }
-        // Journal mode: no background scheduler — snapshot only on deactivation
-        // to avoid state/version tear between concurrent SubscriptionRef and versionRef reads
-
-        // Deactivation finalizer — save final snapshot (safe: runs after event loop stops)
-        yield* Effect.addFinalizer(() =>
-          Effect.gen(function* () {
-            const state = yield* SubscriptionRef.get(runtime.stateRef);
-            const version = yield* Ref.get(versionRef);
-            const now = yield* Clock.currentTimeMillis;
-            yield* pAdapter.saveSnapshot(key, {
-              state,
-              version,
-              timestamp: now,
-            } satisfies Snapshot<S>);
-          }).pipe(Effect.catch(() => Effect.void)),
+      if (strategy === "snapshot") {
+        // Snapshot-only mode: background scheduler is safe (no journal to tear against)
+        yield* SubscriptionRef.changes(runtime.stateRef).pipe(
+          schedule !== undefined ? Stream.schedule(schedule) : (s: Stream.Stream<S>) => s,
+          Stream.runForEach((state) =>
+            Effect.gen(function* () {
+              const version = yield* Ref.get(versionRef);
+              const now = yield* Clock.currentTimeMillis;
+              yield* pAdapter.saveSnapshot(key, {
+                state,
+                version,
+                timestamp: now,
+              } satisfies Snapshot<S>);
+            }).pipe(Effect.catch(() => Effect.void)),
+          ),
+          Effect.forkScoped,
         );
       }
+      // Journal mode: no background scheduler — snapshot only on deactivation
+      // to avoid state/version tear between concurrent SubscriptionRef and versionRef reads
 
-      // Return the queue-draining loop function
-      return (mailbox: Queue.Dequeue<Envelope.Request<Rpcs>>, replier: Entity.Replier<Rpcs>) =>
+      // Deactivation finalizer — save final snapshot (safe: runs after event loop stops)
+      yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
-          const hasPersistence = persistCtx.adapter !== undefined;
-          const journalCtx =
-            hasPersistence && (persistence?.strategy ?? "snapshot") === "journal"
-              ? { adapter: persistCtx.adapter, key: persistCtx.key }
-              : undefined;
+          const state = yield* SubscriptionRef.get(runtime.stateRef);
+          const version = yield* Ref.get(versionRef);
+          const now = yield* Clock.currentTimeMillis;
+          yield* pAdapter.saveSnapshot(key, {
+            state,
+            version,
+            timestamp: now,
+          } satisfies Snapshot<S>);
+        }).pipe(Effect.catch(() => Effect.void)),
+      );
+    }
 
-          // eslint-disable-next-line no-constant-condition
-          while (true) {
-            const request = yield* Queue.take(mailbox);
-            // SAFETY: Envelope.Request is discriminated by its protocol tag at runtime.
-            const tag = (request as { readonly tag: string }).tag;
+    // Return the queue-draining loop function
+    return (mailbox: Queue.Dequeue<Envelope.Request<Rpcs>>, replier: Entity.Replier<Rpcs>) =>
+      Effect.gen(function* () {
+        const hasPersistence = persistCtx.adapter !== undefined;
+        const journalCtx =
+          hasPersistence && (persistence?.strategy ?? "snapshot") === "journal"
+            ? { adapter: persistCtx.adapter, key: persistCtx.key }
+            : undefined;
 
-            switch (tag) {
-              case "Send": {
-                // SAFETY: the Send tag selects the RPC payload carrying machine event E.
-                const event = (request as { readonly payload: { readonly event: E } }).payload
-                  .event;
-                // sendWait fails on defect — orDie propagates to toLayerQueue infrastructure
-                yield* runtime.sendWait(event).pipe(Effect.orDie);
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const request = yield* Queue.take(mailbox);
+          const tag = request.tag;
 
-                if (journalCtx !== undefined) {
-                  // Journal append — inline, before replying. Defects entity on failure.
-                  yield* persistEvent(journalCtx.adapter, journalCtx.key, versionRef, event);
-                } else if (hasPersistence) {
-                  // Snapshot-only: bump version for consistent snapshot versioning
-                  yield* Ref.update(versionRef, (v) => v + 1);
-                }
+          switch (tag) {
+            case "Send": {
+              if (!matchesRpc(entity.rpcs[0], request)) break;
+              const event = request.payload.event;
+              // sendWait fails on defect — orDie propagates to toLayerQueue infrastructure
+              yield* runtime.sendWait(event).pipe(Effect.orDie);
 
-                const state = yield* runtime.getState;
-                yield* replier.succeed(
-                  request,
-                  // SAFETY: the Send RPC success schema is the machine state schema S.
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC success type
-                  state as any,
-                );
-                break;
+              if (journalCtx !== undefined) {
+                // Journal append — inline, before replying. Defects entity on failure.
+                yield* persistEvent(journalCtx.adapter, journalCtx.key, versionRef, event);
+              } else if (hasPersistence) {
+                // Snapshot-only: bump version for consistent snapshot versioning
+                yield* Ref.update(versionRef, (v) => v + 1);
               }
-              case "Ask": {
-                // SAFETY: the Ask tag selects the RPC payload carrying machine event E.
-                const event = (request as { readonly payload: { readonly event: E } }).payload
-                  .event;
-                const reply = yield* runtime.ask(event).pipe(Effect.orDie);
 
-                if (journalCtx !== undefined) {
-                  yield* persistEvent(journalCtx.adapter, journalCtx.key, versionRef, event);
-                } else if (hasPersistence) {
-                  yield* Ref.update(versionRef, (v) => v + 1);
-                }
-
-                yield* replier.succeed(
-                  request,
-                  // SAFETY: runtime.ask validates replies against the event's registered reply schema.
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC success type
-                  reply as any,
-                );
-                break;
-              }
-              case "GetState": {
-                const state = yield* runtime.getState;
-                yield* replier.succeed(
-                  request,
-                  // SAFETY: the GetState RPC success schema is the machine state schema S.
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC success type
-                  state as any,
-                );
-                break;
-              }
-              case "WatchState": {
-                // Streaming RPC — respond with SubscriptionRef.changes stream
-                yield* replier.succeed(
-                  request,
-                  // SAFETY: WatchState streams values from the machine state SubscriptionRef<S>.
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- streaming RPC success type
-                  SubscriptionRef.changes(runtime.stateRef) as any,
-                );
-                break;
-              }
-              default:
-                break;
+              const state = yield* runtime.getState;
+              yield* replier.succeed(request, state);
+              break;
             }
+            case "Ask": {
+              if (!matchesRpc(entity.rpcs[1], request)) break;
+              const event = request.payload.event;
+              const reply = yield* runtime.ask(event).pipe(Effect.orDie);
+
+              if (journalCtx !== undefined) {
+                yield* persistEvent(journalCtx.adapter, journalCtx.key, versionRef, event);
+              } else if (hasPersistence) {
+                yield* Ref.update(versionRef, (v) => v + 1);
+              }
+
+              yield* replier.succeed(request, reply);
+              break;
+            }
+            case "GetState": {
+              if (!matchesRpc(entity.rpcs[2], request)) break;
+              const state = yield* runtime.getState;
+              yield* replier.succeed(request, state);
+              break;
+            }
+            case "WatchState": {
+              if (!matchesRpc(entity.rpcs[3], request)) break;
+              // Streaming RPC — respond with SubscriptionRef.changes stream
+              yield* replier.succeed(request, SubscriptionRef.changes(runtime.stateRef));
+              break;
+            }
+            default:
+              break;
           }
-        });
-    });
+        }
+      });
+  });
 
-    // Collect cluster options to forward
-    const clusterOptions: ClusterQueueOptions = {};
-    if (options?.maxIdleTime !== undefined) clusterOptions.maxIdleTime = options.maxIdleTime;
-    if (options?.mailboxCapacity !== undefined)
-      clusterOptions.mailboxCapacity = options.mailboxCapacity;
-    if (options?.disableFatalDefects !== undefined)
-      clusterOptions.disableFatalDefects = options.disableFatalDefects;
-    if (options?.defectRetryPolicy !== undefined)
-      clusterOptions.defectRetryPolicy = options.defectRetryPolicy;
+  // Collect cluster options to forward
+  const clusterOptions: ClusterQueueOptions = {};
+  if (options?.maxIdleTime !== undefined) clusterOptions.maxIdleTime = options.maxIdleTime;
+  if (options?.mailboxCapacity !== undefined)
+    clusterOptions.mailboxCapacity = options.mailboxCapacity;
+  if (options?.disableFatalDefects !== undefined)
+    clusterOptions.disableFatalDefects = options.disableFatalDefects;
+  if (options?.defectRetryPolicy !== undefined)
+    clusterOptions.defectRetryPolicy = options.defectRetryPolicy;
 
-    // SAFETY: Entity.toLayerQueue hides the machine Effect requirements that build retains as R.
-    // eslint-disable-next-line anti-slop/no-chained-type-assertions -- Layer's R parameter is invariant
-    return entity.toLayerQueue(
-      // orDie: persistence failures during activation are defects (entity retry handles them)
-      build.pipe(Effect.orDie),
-      Object.keys(clusterOptions).length > 0 ? clusterOptions : undefined,
-    ) as unknown as Layer.Layer<never, never, R>;
-  },
-};
+  return entity.toLayerQueue(
+    // orDie: persistence failures during activation are defects (entity retry handles them)
+    build.pipe(Effect.orDie),
+    Object.keys(clusterOptions).length > 0 ? clusterOptions : undefined,
+  );
+}
+
+export const EntityMachine = { layer };
 
 // ============================================================================
 // Helpers

@@ -19,6 +19,30 @@ const CounterEvent = Event({
 });
 
 describe("Machine", () => {
+  test("requirement-growing methods are copy-on-write", () => {
+    const base = Machine.make({
+      state: CounterState,
+      event: CounterEvent,
+      initial: CounterState.Idle({ count: 0 }),
+    }).on(CounterState.Idle, CounterEvent.Start, ({ state }) =>
+      CounterState.Counting({ count: state.count }),
+    );
+
+    const withSpawn = base.spawn(CounterState.Counting, () => Effect.void);
+    const withBackground = base.background(() => Effect.void);
+    const withTask = base.task(CounterState.Counting, () => Effect.succeed(CounterEvent.Stop), {});
+
+    expect(withSpawn).not.toBe(base);
+    expect(withBackground).not.toBe(base);
+    expect(withTask).not.toBe(base);
+    expect(base.spawnEffects).toHaveLength(0);
+    expect(base.backgroundEffects).toHaveLength(0);
+    expect(withSpawn.spawnEffects).toHaveLength(1);
+    expect(withBackground.backgroundEffects).toHaveLength(1);
+    expect(withTask.spawnEffects).toHaveLength(1);
+    expect(withSpawn.transitions).toHaveLength(1);
+  });
+
   test("creates machine with initial state using .pipe() syntax", () => {
     const machine = Machine.make({
       state: CounterState,

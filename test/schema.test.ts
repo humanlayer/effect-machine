@@ -167,6 +167,22 @@ describe("State (schema-first)", () => {
     const off = ToggleState.Off;
     expect(off._tag).toBe("Off");
   });
+
+  test("single-variant schemas retain decoding and narrowing", () => {
+    const OnlyState = State({
+      Ready: { value: Schema.Number },
+    });
+
+    const decoded = Schema.decodeUnknownSync(OnlyState)({ _tag: "Ready", value: 42 });
+    if (decoded._tag === "Ready") {
+      const value: number = decoded.value;
+      expect(value).toBe(42);
+    }
+  });
+
+  test("rejects an empty definition", () => {
+    expect(() => State({})).toThrow();
+  });
 });
 
 describe("State.with()", () => {
@@ -207,7 +223,7 @@ describe("State.with()", () => {
 
     expect(b._tag).toBe("B");
     expect(b.x).toBe(42);
-    expect((b as unknown as Record<string, unknown>)["y"]).toBeUndefined();
+    expect(Object.hasOwn(b, "y")).toBe(false);
   });
 
   test("cross-state: picks + overrides", () => {
@@ -272,7 +288,7 @@ describe("State.with()", () => {
     const b = TS.B.with(a);
 
     expect(b.x).toBe(1);
-    expect((b as unknown as Record<string, unknown>)["extra"]).toBeUndefined();
+    expect(Object.hasOwn(b, "extra")).toBe(false);
   });
 });
 
@@ -353,7 +369,7 @@ describe("State.with() (union-level)", () => {
 
     expect(updated._tag).toBe("Idle");
     expect(updated.queue).toEqual(["a"]);
-    expect((updated as unknown as Record<string, unknown>)["model"]).toBeUndefined();
+    expect(Object.hasOwn(updated, "model")).toBe(false);
   });
 
   test("throws on unknown _tag", () => {
@@ -423,6 +439,17 @@ describe("Event (schema-first)", () => {
       Cancel: (e) => `Cancelled: ${e.reason}`,
     });
     expect(result).toBe("Shipping: abc");
+  });
+
+  test("preserves reply schema metadata through dynamic schema construction", () => {
+    const QueryEvent = Event({
+      GetCount: Event.reply({}, Schema.Number),
+      Reset: {},
+    });
+
+    expect(QueryEvent._replySchemas.get("GetCount")).toBe(Schema.Number);
+    expect(QueryEvent._replySchemas.has("Reset")).toBe(false);
+    expect(Schema.decodeUnknownSync(QueryEvent)({ _tag: "GetCount" })._tag).toBe("GetCount");
   });
 });
 

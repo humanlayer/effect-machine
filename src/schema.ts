@@ -278,7 +278,7 @@ type RuntimeConstructor =
 /* eslint-enable anti-slop/no-unsafe-dictionary-type */
 
 interface BuiltMachineSchema<D extends Record<string, Schema.Struct.Fields>> {
-  readonly schema: Schema.Schema<VariantsUnion<D>>;
+  readonly schema: Schema.Codec<VariantsUnion<D>, unknown>;
   readonly variants: VariantSchemas<D>;
   readonly constructors: Record<string, RuntimeConstructor>;
   readonly _definition: D;
@@ -345,8 +345,8 @@ const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
       constructors[tag] = constructor;
     } else {
       // Empty: plain value, not callable
-      // SAFETY: empty variants require no payload and expose only the common runtime with contract.
-      constructors[tag] = { _tag: tag, with: () => ({ _tag: tag }) } as never;
+      // Empty variants use the tagged-value arm of RuntimeConstructor.
+      constructors[tag] = { _tag: tag, with: () => ({ _tag: tag }) };
     }
   }
 
@@ -402,10 +402,13 @@ const buildMachineSchema = <D extends Record<string, Schema.Struct.Fields>>(
     };
   }
 
-  // SAFETY: the union and variants are assembled exclusively from the same definition D.
+  // Re-enter the typed Schema API at its AST boundary. Every AST member above was
+  // assembled from the corresponding entry in definition D.
+  const schema = Schema.make<Schema.Codec<VariantsUnion<D>, unknown>>(unionSchema.ast);
+
   return {
-    // eslint-disable-next-line anti-slop/no-chained-type-assertions -- Effect's dynamic union loses D's static relationship
-    schema: unionSchema as unknown as Schema.Schema<VariantsUnion<D>>,
+    schema,
+    // SAFETY: every key was populated from definition D above.
     // eslint-disable-next-line anti-slop/no-known-value-widening -- keys were populated from definition D above
     variants: variants as VariantSchemas<D>,
     constructors,
