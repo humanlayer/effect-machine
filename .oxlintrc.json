@@ -71,7 +71,6 @@
         "anti-slop/no-object-parameters": "off",
         "anti-slop/no-unknown-type-aliases": "off",
         "anti-slop/no-unsafe-dictionary-type": "off",
-        "anti-slop/no-widen-then-assert": "off",
         "anti-slop/require-safety-comment-for-type-assertion": "off",
         "typescript/no-non-null-assertion": "off",
         "typescript/no-explicit-any": "off"
