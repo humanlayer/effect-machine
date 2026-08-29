@@ -1,7 +1,8 @@
 // Machine namespace (Effect-style)
 export * as Machine from "./machine.js";
 
-// Slot module
+// Legacy slot module
+/** @deprecated Prefer Effect services and layers for machine dependencies. */
 export { Slot } from "./slot.js";
 export type {
   SlotsDef,

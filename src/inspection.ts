@@ -132,7 +132,7 @@ export interface InspectorService<S, E> {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class Inspector extends Context.Service<Inspector, InspectorService<any, any>>()(
-  "effect-machine/inspection/Inspector",
+  "@humanlayer/effect-machine/inspection/Inspector",
 ) {}
 
 /**

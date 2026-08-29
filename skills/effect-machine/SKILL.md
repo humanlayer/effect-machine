@@ -1,6 +1,6 @@
 ---
-name: effect-machine
-description: Type-safe state machines for Effect. Use when building state machines with effect-machine — defining states/events, transition handlers, spawn effects, timeouts, postpone, actors, typed ask/reply, testing, recovery/durability lifecycle. Triggers on effect-machine imports, Machine.make, Machine.spawn, actor.start, Machine.replay, Machine.reply, Event.reply, State/Event definitions, ActorRef usage, Recovery, Durability, Lifecycle.
+name: humanlayer-effect-machine
+description: Type-safe state machines for Effect. Use when building state machines with @humanlayer/effect-machine — defining states/events, transition handlers, service-backed state effects, timeouts, postpone, actors, typed ask/reply, testing, recovery/durability lifecycle. Triggers on @humanlayer/effect-machine imports, Machine.make, Machine.spawn, actor.start, Machine.replay, Machine.reply, Event.reply, State/Event definitions, ActorRef usage, Recovery, Durability, Lifecycle.
 ---
 
 ## Navigation
@@ -15,7 +15,7 @@ What are you building?
 ├─ Typed ask/reply                  → §Ask / Reply
 ├─ Recovery/durability              → §Lifecycle
 ├─ Timeouts / postpone              → §Timeouts, §Postpone
-└─ Slots (guards/effects)           → §Slots
+└─ Providing Effect services        → §Services And Layers
 ```
 
 ## Schema-First
@@ -24,7 +24,7 @@ States and events ARE schemas. `State({})` and `Event({})` produce tagged unions
 
 ```ts
 import { Schema } from "effect";
-import { State, Event } from "effect-machine";
+import { State, Event } from "@humanlayer/effect-machine";
 
 const S = State({
   Idle: {}, // empty → plain value: S.Idle
@@ -39,11 +39,11 @@ const E = Event({
 });
 ```
 
-**derive** — construct from existing state, picks overlapping fields:
+**with** — construct from existing state, picks overlapping fields:
 
 ```ts
-S.Active.derive(state); // pick target fields from source
-S.Active.derive(state, { count: n + 1 }); // pick + override
+S.Active.with(state); // pick target fields from source
+S.Active.with(state, { count: n + 1 }); // pick + override
 ```
 
 **Type guards / matching:**
@@ -67,7 +67,7 @@ const machine = Machine.make({ state: S, event: E, initial: S.Idle })
   .onAny(E.Cancel, () => S.Cancelled)
 
   // Reenter same state (re-triggers spawn effects + timeouts)
-  .reenter(S.Active, E.Refresh, ({ state }) => S.Active.derive(state))
+  .reenter(S.Active, E.Refresh, ({ state }) => S.Active.with(state))
 
   // Mark final states (actor stops, postpone buffer settles)
   .final(S.Done)
@@ -84,7 +84,7 @@ const machine = Machine.make({ state: S, event: E, initial: S.Idle })
 ({ state }) => Effect.gen(function* () { ... return S.Next({ ... }) })
 
 // With reply (for actor.ask — event must use Event.reply()):
-({ state }) => Machine.reply(S.Same.derive(state), state.count)
+({ state }) => Machine.reply(S.Same.with(state), state.count)
 ```
 
 ## Effects
@@ -119,45 +119,36 @@ machine.background(({ self }) =>
 );
 ```
 
-## Slots
+## Services And Layers
 
-Unified parameterized slots via `Slot.define` + `Slot.fn`. Handlers take only params:
+State effects use normal Effect services. Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine and provided when it starts:
 
 ```ts
-import { Slot } from "effect-machine";
+import { Context, Effect, Layer } from "effect";
 
-const MySlots = Slot.define({
-  canRetry: Slot.fn({ max: Schema.Number }, Schema.Boolean),
-  notify: Slot.fn({ msg: Schema.String }),
-});
+class Loader extends Context.Service<
+  Loader,
+  { readonly load: (url: string) => Effect.Effect<string> }
+>()("@app/Loader") {}
 
-const machine = Machine.make({
-  state: S,
-  event: E,
-  slots: MySlots,
-  initial: S.Idle,
-})
-  .on(S.Error, E.Retry, ({ slots, state }) =>
-    Effect.gen(function* () {
-      if (yield* slots.canRetry({ max: 3 })) return S.Loading.derive(state);
-      return S.Failed;
-    }),
-  )
-  .spawn(S.Done, ({ slots, state }) => slots.notify({ msg: `Done: ${state.id}` }));
+const machine = Machine.make({ state: S, event: E, initial: S.Idle })
+  .on(S.Idle, E.Start, ({ event }) => S.Loading({ url: event.url }))
+  .task(
+    S.Loading,
+    ({ state }) =>
+      Effect.gen(function* () {
+        const loader = yield* Loader;
+        return yield* loader.load(state.url);
+      }),
+    { onSuccess: (data) => E.Done({ data }) },
+  );
 
-// Provide at spawn time — handlers take only params
-const actor =
-  yield *
-  Machine.spawn(machine, {
-    slots: {
-      canRetry: ({ max }) => attempts < max,
-      notify: ({ msg }) => Effect.log(msg),
-    },
-  });
+const LoaderLive = Layer.succeed(Loader, { load: (url) => Http.get(url) });
+const actor = yield * Machine.spawn(machine).pipe(Effect.provide(LoaderLive));
 yield * actor.start;
 ```
 
-Slots are accepted everywhere: `Machine.spawn`, `Machine.replay`, `simulate`, `createTestHarness`.
+Transition handlers remain pure. Run I/O in state effects and map the result to an event.
 
 ## Ask / Reply
 
@@ -170,7 +161,7 @@ const E = Event({
 });
 
 // Handler — Machine.reply() required for reply-bearing events
-machine.on(S.Active, E.GetCount, ({ state }) => Machine.reply(S.Active.derive(state), state.count));
+machine.on(S.Active, E.GetCount, ({ state }) => Machine.reply(S.Active.with(state), state.count));
 
 // Caller — return type inferred from schema
 const count = yield * actor.ask(E.GetCount); // number
@@ -339,7 +330,7 @@ yield * actor.start;
 ## Testing
 
 ```ts
-import { simulate, assertPath, assertReaches, createTestHarness } from "effect-machine";
+import { simulate, assertPath, assertReaches, createTestHarness } from "@humanlayer/effect-machine";
 
 // Simulate — run events, get all states
 const { states, finalState } = yield * simulate(machine, [E.Start, E.Done]);
@@ -360,7 +351,7 @@ Both `simulate` and `createTestHarness` accept `Machine` directly.
 ## Gotchas
 
 - **`Machine.spawn` returns unstarted actor** — must call `yield* actor.start`. `system.spawn` auto-starts.
-- **Slots are provided at spawn time** — `Machine.spawn(machine, { slots: { ... } })`
+- **Provide service implementations with layers** — `Machine.spawn(machine).pipe(Effect.provide(MyLayer))`
 - **Empty state = value, non-empty = constructor** — `S.Idle` vs `S.Loading({ url })`
 - **Spawn effects re-run on hydrate** — `Machine.spawn({ hydrate })` re-runs spawn effects for the hydrated state (timers, scoped resources)
 - **`hydrate` overrides recovery** — `resolve()` is never called when `hydrate` is set
@@ -368,4 +359,3 @@ Both `simulate` and `createTestHarness` accept `Machine` directly.
 - **Effectful handlers in replay** — replay runs handlers but stubs `self`/`system`. Side effects through `self.send` are no-ops.
 - **`ask()` requires reply schema** — only events with `Event.reply()` accepted; non-reply events are type errors
 - **Reply decode failure = defect** — if handler returns wrong type, actor dies (broken handler, not business logic)
-- **v3 compat** — import from `"effect-machine/v3"` for Effect v3 projects

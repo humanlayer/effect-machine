@@ -1,6 +1,6 @@
-# effect-machine Skill
+# @humanlayer/effect-machine Skill
 
-Quick reference for AI agents working with effect-machine.
+Quick reference for AI agents working with @humanlayer/effect-machine.
 
 ## What It Is
 
@@ -9,7 +9,7 @@ Type-safe state machines for Effect. Schema-first API.
 ## Core Pattern
 
 ```ts
-import { Machine, State, Event, Slot } from "effect-machine";
+import { Machine, State, Event } from "@humanlayer/effect-machine";
 
 // 1. Define schemas
 const MyState = State({
@@ -48,55 +48,55 @@ const machine = Machine.make({
 | `.background(handler)`                 | Machine-lifetime effect                 |
 | `.final(state)`                        | Mark final state                        |
 
-## State.derive()
+## State.with()
 
 Construct state from existing source:
 
 ```ts
 // Per-variant: preserve fields, override specific ones
-State.Active.derive(state, { count: state.count + 1 });
+State.Active.with(state, { count: state.count + 1 });
 
 // Cross-state: picks only target fields
-State.Shipped.derive(processingState, { trackingId: "TRACK-123" });
+State.Shipped.with(processingState, { trackingId: "TRACK-123" });
 
 // Empty variant
-State.Idle.derive(anyState); // → { _tag: "Idle" }
+State.Idle.with(anyState); // -> { _tag: "Idle" }
 
 // Union-level: dispatches to correct variant based on _tag
 // Preserves specific variant subtype — no switch needed
-const updated = MyState.derive(state, { queue: newQueue });
+const updated = MyState.with(state, { queue: newQueue });
 ```
 
-## Slots
+## Services And Layers
 
 ```ts
-const MySlots = Slot.define({
-  canRetry: Slot.fn({ max: Schema.Number }, Schema.Boolean),
-  fetch: Slot.fn({ url: Schema.String }),
+import { Context, Effect, Layer } from "effect";
+
+class Fetcher extends Context.Service<
+  Fetcher,
+  { readonly fetch: (url: string) => Effect.Effect<string> }
+>()("@app/Fetcher") {}
+
+const machine = Machine.make({ state, event, initial })
+  .on(State.X, Event.Start, () => State.Loading)
+  .task(
+    State.Loading,
+    () =>
+      Effect.gen(function* () {
+        const fetcher = yield* Fetcher;
+        return yield* fetcher.fetch("/api");
+      }),
+    { onSuccess: (data) => Event.Loaded({ data }) },
+  );
+
+const FetcherLive = Layer.succeed(Fetcher, {
+  fetch: (url) => Http.get(url),
 });
 
-const machine = Machine.make({ state, event, slots: MySlots, initial }).on(
-  State.X,
-  Event.Y,
-  ({ slots }) =>
-    Effect.gen(function* () {
-      if (yield* slots.canRetry({ max: 3 })) {
-        yield* slots.fetch({ url: "/api" });
-      }
-      return State.Z;
-    }),
-);
-
-// Slot implementations provided at spawn time — handlers take only params
-const actor =
-  yield *
-  Machine.spawn(machine, {
-    slots: {
-      canRetry: ({ max }) => attempts < max,
-      fetch: ({ url }) => Http.get(url),
-    },
-  });
+const actor = yield * Machine.spawn(machine).pipe(Effect.provide(FetcherLive));
 ```
+
+Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine. Transition handlers remain pure; map I/O results back into the machine with events.
 
 ## Running Actors
 
@@ -237,7 +237,7 @@ expect(result.newState._tag).toBe("Loading");
 4. **Same-state skips lifecycle**: Use `.reenter()` to force
 5. **Never throw in Effect.gen**: Use `yield* Effect.fail()`
 6. **`.onAny()` is fallback**: Specific `.on()` always takes priority
-7. **Slots at spawn time**: `Machine.spawn(machine, { slots: { ... } })` — not on the builder
+7. **Provide services with layers**: `Machine.spawn(machine).pipe(Effect.provide(MyLayer))`
 8. **call vs send**: `send`/`cast` = fire-and-forget, `call` = request-reply, `ask` = typed reply
 9. **Sync helpers**: Use `actor.sync.*` (not top-level `sendSync`/`snapshotSync`)
 10. **ActorStoppedError**: Pending `call`/`ask` Deferreds settled on stop
@@ -247,7 +247,7 @@ expect(result.newState._tag).toBe("Loading");
 Wire machines to `@effect/cluster` for distributed actors:
 
 ```ts
-import { toEntity, EntityMachine, PersistenceAdapter } from "effect-machine/cluster";
+import { toEntity, EntityMachine, PersistenceAdapter } from "@humanlayer/effect-machine/cluster";
 
 const OrderEntity = toEntity(orderMachine, { type: "Order" });
 
@@ -277,8 +277,7 @@ const OrderEntityLayer = EntityMachine.layer(OrderEntity, orderMachine, {
 | File                            | Purpose                                |
 | ------------------------------- | -------------------------------------- |
 | `machine.ts`                    | Machine builder                        |
-| `schema.ts`                     | State/Event + derive                   |
-| `slot.ts`                       | Slot.define/Slot.fn                    |
+| `schema.ts`                     | State/Event + with                     |
 | `actor.ts`                      | ActorSystem, event loop                |
 | `testing.ts`                    | simulate, harness                      |
 | `internal/runtime.ts`           | Shared runtime kernel (entity-machine) |

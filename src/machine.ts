@@ -3,41 +3,33 @@
  *
  * @example
  * ```ts
- * import { Machine, State, Event, Slot } from "effect-machine"
+ * import { Context, Effect, Layer, Schema } from "effect"
+ * import { Machine, State, Event } from "@humanlayer/effect-machine"
  *
- * const MyState = State({ Idle: {}, Running: { count: Schema.Number } })
- * const MyEvent = Event({ Start: {}, Stop: {} })
+ * const MyState = State({ Idle: {}, Running: {}, Done: { count: Schema.Number } })
+ * const MyEvent = Event({ Start: {}, Loaded: { count: Schema.Number } })
  *
- * const MySlots = Slot.define({
- *   canStart: Slot.fn({ threshold: Schema.Number }, Schema.Boolean),
- *   notify: Slot.fn({ message: Schema.String }),
- * })
+ * class Counter extends Context.Service<
+ *   Counter,
+ *   { readonly load: () => Effect.Effect<number> }
+ * >()("@app/Counter") {}
  *
  * const machine = Machine.make({
  *   state: MyState,
  *   event: MyEvent,
- *   slots: MySlots,
  *   initial: MyState.Idle,
  * })
- *   .on(MyState.Idle, MyEvent.Start, ({ state, slots }) =>
- *     Effect.gen(function* () {
- *       if (yield* slots.canStart({ threshold: 5 })) {
- *         yield* slots.notify({ message: "Starting!" })
- *         return MyState.Running({ count: 0 })
- *       }
- *       return state
- *     })
+ *   .on(MyState.Idle, MyEvent.Start, () => MyState.Running({ count: 0 }))
+ *   .task(
+ *     MyState.Running,
+ *     () => Counter.pipe(Effect.flatMap((counter) => counter.load())),
+ *     { onSuccess: (count) => MyEvent.Loaded({ count }) },
  *   )
- *   .on(MyState.Running, MyEvent.Stop, () => MyState.Idle)
- *   .final(MyState.Idle)
+ *   .on(MyState.Running, MyEvent.Loaded, ({ event }) => MyState.Done({ count: event.count }))
+ *   .final(MyState.Done)
  *
- * // Spawn with slot implementations
- * const actor = yield* Machine.spawn(machine, {
- *   slots: {
- *     canStart: ({ threshold }) => Effect.succeed(threshold > 0),
- *     notify: ({ message }) => Effect.log(message),
- *   },
- * })
+ * const CounterLive = Layer.succeed(Counter, { load: () => Effect.succeed(0) })
+ * const actor = yield* Machine.spawn(machine).pipe(Effect.provide(CounterLive))
  * ```
  *
  * @module
@@ -259,9 +251,10 @@ export interface MakeConfig<
 > {
   readonly state: MachineStateSchema<SD> & { Type: S };
   readonly event: MachineEventSchema<ED> & { Type: E };
+  /** @deprecated Prefer Effect `Context.Service` dependencies in state effects. */
   readonly slots?: SlotsSchema<SLD>;
   readonly initial: S;
-  /** Validate slot inputs/outputs at runtime. Default: true. Set to false for hot paths. */
+  /** @deprecated Only applies to the legacy slot API. */
   readonly slotValidation?: boolean;
 }
 
@@ -757,20 +750,20 @@ export class Machine<
    * ```
    */
   /** Single state */
-  spawn<NS extends VariantsUnion<_SD> & BrandedState>(
+  spawn<NS extends VariantsUnion<_SD> & BrandedState, R1>(
     state: TaggedOrConstructor<NS>,
-    handler: StateEffectHandler<NS, VariantsUnion<_ED> & BrandedEvent, SD, Scope.Scope>,
-  ): Machine<State, Event, R, _SD, _ED, SD>;
+    handler: StateEffectHandler<NS, VariantsUnion<_ED> & BrandedEvent, SD, Scope.Scope | R1>,
+  ): Machine<State, Event, R | R1, _SD, _ED, SD>;
   /** Multiple states */
-  spawn<NS extends ReadonlyArray<TaggedOrConstructor<VariantsUnion<_SD> & BrandedState>>>(
+  spawn<NS extends ReadonlyArray<TaggedOrConstructor<VariantsUnion<_SD> & BrandedState>>, R1>(
     states: NS,
     handler: StateEffectHandler<
       NS[number] extends TaggedOrConstructor<infer S> ? S : never,
       VariantsUnion<_ED> & BrandedEvent,
       SD,
-      Scope.Scope
+      Scope.Scope | R1
     >,
-  ): Machine<State, Event, R, _SD, _ED, SD>;
+  ): Machine<State, Event, R | R1, _SD, _ED, SD>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   spawn(stateOrStates: any, handler: any): Machine<State, Event, R, _SD, _ED, SD> {
     const states = Array.isArray(stateOrStates) ? stateOrStates : [stateOrStates];
@@ -802,20 +795,22 @@ export class Machine<
     NS extends VariantsUnion<_SD> & BrandedState,
     A,
     E1,
+    R1,
     ES extends VariantsUnion<_ED> & BrandedEvent,
     EF extends VariantsUnion<_ED> & BrandedEvent,
   >(
     state: TaggedOrConstructor<NS>,
     run: (
       ctx: StateHandlerContext<NS, VariantsUnion<_ED> & BrandedEvent, SD>,
-    ) => Effect.Effect<A, E1, Scope.Scope>,
+    ) => Effect.Effect<A, E1, Scope.Scope | R1>,
     options: TaskOptions<NS, VariantsUnion<_ED> & BrandedEvent, SD, A, E1, ES, EF>,
-  ): Machine<State, Event, R, _SD, _ED, SD>;
+  ): Machine<State, Event, R | R1, _SD, _ED, SD>;
   /** Multiple states, explicit onSuccess */
   task<
     NS extends ReadonlyArray<TaggedOrConstructor<VariantsUnion<_SD> & BrandedState>>,
     A,
     E1,
+    R1,
     ES extends VariantsUnion<_ED> & BrandedEvent,
     EF extends VariantsUnion<_ED> & BrandedEvent,
   >(
@@ -826,7 +821,7 @@ export class Machine<
         VariantsUnion<_ED> & BrandedEvent,
         SD
       >,
-    ) => Effect.Effect<A, E1, Scope.Scope>,
+    ) => Effect.Effect<A, E1, Scope.Scope | R1>,
     options: TaskOptions<
       NS[number] extends TaggedOrConstructor<infer S> ? S : never,
       VariantsUnion<_ED> & BrandedEvent,
@@ -836,7 +831,7 @@ export class Machine<
       ES,
       EF
     >,
-  ): Machine<State, Event, R, _SD, _ED, SD>;
+  ): Machine<State, Event, R | R1, _SD, _ED, SD>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   task(stateOrStates: any, run: any, options: any): Machine<State, Event, R, _SD, _ED, SD> {
     const handler = Effect.fn("effect-machine.task")(function* (
@@ -956,9 +951,9 @@ export class Machine<
    * );
    * ```
    */
-  background(
-    handler: StateEffectHandler<State, Event, SD, Scope.Scope>,
-  ): Machine<State, Event, R, _SD, _ED, SD> {
+  background<R1>(
+    handler: StateEffectHandler<State, Event, SD, Scope.Scope | R1>,
+  ): Machine<State, Event, R | R1, _SD, _ED, SD> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (this._backgroundEffects as any[]).push({
       handler: handler as unknown as BackgroundEffect<State, Event, SD, R>["handler"],

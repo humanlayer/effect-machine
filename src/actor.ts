@@ -298,7 +298,7 @@ export interface ActorSystemService {
  * ActorSystem service tag
  */
 export class ActorSystem extends Context.Service<ActorSystem, ActorSystemService>()(
-  "effect-machine/actor/ActorSystem",
+  "@humanlayer/effect-machine/actor/ActorSystem",
 ) {}
 
 /**
@@ -311,7 +311,7 @@ export class ActorSystem extends Context.Service<ActorSystem, ActorSystemService
  * Provide via `Machine.scoped` or `Effect.provideService(ActorScope, scope)`.
  */
 export class ActorScope extends Context.Service<ActorScope, Scope.Scope>()(
-  "effect-machine/actor/ActorScope",
+  "@humanlayer/effect-machine/actor/ActorScope",
 ) {}
 
 // ============================================================================

@@ -9,7 +9,31 @@
     "perf": "error"
   },
   "plugins": ["typescript", "import"],
+  "jsPlugins": [
+    { "name": "anti-slop", "specifier": "./tools/oxlint/anti-slop/index.ts" },
+    {
+      "name": "anti-slop-effect",
+      "specifier": "./tools/oxlint/anti-slop/effect/index.ts"
+    }
+  ],
   "rules": {
+    "complexity": ["error", 20],
+    "anti-slop/no-chained-type-assertions": "error",
+    "anti-slop/no-conditional-empty-object-spread": "error",
+    "anti-slop/no-known-value-widening": "error",
+    "anti-slop/no-module-mocking": "error",
+    "anti-slop/no-object-parameters": "error",
+    "anti-slop/no-reflect-apply": "error",
+    "anti-slop/no-reflect-get": "error",
+    "anti-slop/no-runtime-typeof": ["error", { "allowInTypeGuards": true }],
+    "anti-slop/no-shape-in-symbol-names": "error",
+    "anti-slop/no-unknown-parameters": "error",
+    "anti-slop/no-unknown-returns": "error",
+    "anti-slop/no-unknown-type-aliases": "error",
+    "anti-slop/no-unsafe-dictionary-type": "error",
+    "anti-slop/no-widen-then-assert": "error",
+    "anti-slop/require-safety-comment-for-type-assertion": "error",
+    "anti-slop-effect/no-service-constructor-imports": "error",
     "typescript/no-explicit-any": "error",
     "typescript/no-non-null-assertion": "error",
     "typescript/no-extra-non-null-assertion": "error",
@@ -24,6 +48,7 @@
     "no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
     "typescript/no-unsafe-type-assertion": "off",
     "typescript/no-unnecessary-type-parameters": "off",
+    "typescript/no-unnecessary-type-assertion": "off",
     "typescript/consistent-return": "off",
     "typescript/no-unnecessary-type-arguments": "off",
     "typescript/unbound-method": "off",
@@ -32,17 +57,30 @@
   },
   "ignorePatterns": [
     "**/dist/**",
-    "**/dist-v3/**",
     "**/node_modules/**",
     "**/*.d.ts",
-    "**/src-v3/**"
+    ".humanlayer/tasks/**",
+    "tools/oxlint/anti-slop/**"
   ],
   "overrides": [
     {
       "files": ["**/*.test.ts"],
       "rules": {
+        "anti-slop/no-chained-type-assertions": "off",
+        "anti-slop/no-known-value-widening": "off",
+        "anti-slop/no-object-parameters": "off",
+        "anti-slop/no-unknown-type-aliases": "off",
+        "anti-slop/no-unsafe-dictionary-type": "off",
+        "anti-slop/no-widen-then-assert": "off",
+        "anti-slop/require-safety-comment-for-type-assertion": "off",
         "typescript/no-non-null-assertion": "off",
         "typescript/no-explicit-any": "off"
+      }
+    },
+    {
+      "files": ["src/machine.ts", "src/cluster/entity-machine.ts"],
+      "rules": {
+        "anti-slop-effect/no-service-constructor-imports": "off"
       }
     }
   ]

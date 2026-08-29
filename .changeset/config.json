@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
-  "changelog": ["@changesets/changelog-github", { "repo": "cevr/effect-machine" }],
+  "changelog": ["@changesets/changelog-github", { "repo": "humanlayer/effect-machine" }],
   "commit": false,
   "fixed": [],
   "linked": [],

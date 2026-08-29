@@ -1,4 +1,4 @@
-# effect-machine
+# @humanlayer/effect-machine
 
 ## 0.17.1
 

@@ -2,8 +2,8 @@
 import type { Brand } from "effect";
 
 // String-based type IDs for branding (v4 Brand requires string keys)
-export type StateTypeId = "effect-machine/StateTypeId";
-export type EventTypeId = "effect-machine/EventTypeId";
+export type StateTypeId = "@humanlayer/effect-machine/StateTypeId";
+export type EventTypeId = "@humanlayer/effect-machine/EventTypeId";
 
 // Brand interfaces
 export interface StateBrand extends Brand.Brand<StateTypeId> {}
@@ -14,7 +14,7 @@ export type BrandedState = { readonly _tag: string } & StateBrand;
 export type BrandedEvent = { readonly _tag: string } & EventBrand;
 
 // String-based schema branding (ties brand to specific schema definition)
-type SchemaIdTypeId = "effect-machine/SchemaIdTypeId";
+type SchemaIdTypeId = "@humanlayer/effect-machine/SchemaIdTypeId";
 
 /**
  * Brand that captures the schema definition type D.
@@ -39,7 +39,7 @@ export type FullEventBrand<D extends Record<string, unknown>> = EventBrand & Sch
  * Brand that carries the reply type for an event variant.
  * Present only on events defined with Event.reply().
  */
-export type ReplyTypeId = "effect-machine/ReplyTypeId";
+export type ReplyTypeId = "@humanlayer/effect-machine/ReplyTypeId";
 export interface ReplyTypeBrand<R> extends Brand.Brand<ReplyTypeId> {
   readonly _ReplyType: R;
 }

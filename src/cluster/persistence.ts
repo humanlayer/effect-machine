@@ -98,4 +98,4 @@ export interface PersistenceAdapterService {
 export class PersistenceAdapter extends Context.Service<
   PersistenceAdapter,
   PersistenceAdapterService
->()("effect-machine/cluster/persistence/PersistenceAdapter") {}
+>()("@humanlayer/effect-machine/cluster/persistence/PersistenceAdapter") {}

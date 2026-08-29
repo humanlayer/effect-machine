@@ -1,8 +1,8 @@
-# effect-machine
+# @humanlayer/effect-machine
 
-Type-safe state machines for [Effect](https://effect.website).
+Type-safe state machines and actors for [Effect](https://effect.website).
 
-Complex workflows usually fail the same way: one `status` field, a few side booleans, and effects scattered across callbacks. `effect-machine` gives you one typed model for state, events, and transitions, then runs it as a real actor.
+Complex workflows usually fail the same way: one `status` field, a few side booleans, and effects scattered across callbacks. `@humanlayer/effect-machine` gives you one typed model for state, events, and transitions, then runs it as a real actor.
 
 Use it when a feature has:
 
@@ -14,20 +14,28 @@ Use it when a feature has:
 ## Install
 
 ```bash
-bun add effect-machine effect
+bun add @humanlayer/effect-machine effect
 ```
 
-`effect` is a peer dependency. The repository validates both the v4 entrypoint
-and the `effect-machine/v3` mirror with `@effect/tsgo`, the latest Effect beta,
-type-aware oxlint, and Bun tests.
+`effect` is a peer dependency. This package is validated against the latest Effect v4 beta.
 
 ## Core Pattern
 
-States and events are schemas. Types, validation, and serialization from one place.
+States and events are schemas. Types, validation, and serialization come from one place.
 
 ```ts
-import { Schema } from "effect";
-import { Event, Machine, Slot, State } from "effect-machine";
+import { Cause, Context, Effect, Layer, Schema } from "effect";
+import { Event, Machine, State } from "@humanlayer/effect-machine";
+
+class Payments extends Context.Service<
+  Payments,
+  {
+    readonly charge: (
+      cartId: string,
+      totalCents: number,
+    ) => Effect.Effect<{ readonly receiptId: string }, Error>;
+  }
+>()("@app/Payments") {}
 
 const CheckoutState = State({
   ReviewingCart: { cartId: Schema.String, totalCents: Schema.Number },
@@ -43,30 +51,34 @@ const CheckoutEvent = Event({
   Cancel: {},
 });
 
-const CheckoutSlots = Slot.define({
-  chargeCard: Slot.fn({ cartId: Schema.String, totalCents: Schema.Number }),
-});
-
 const checkoutMachine = Machine.make({
   state: CheckoutState,
   event: CheckoutEvent,
-  slots: CheckoutSlots,
   initial: CheckoutState.ReviewingCart({ cartId: "cart_123", totalCents: 4200 }),
 })
   .on(CheckoutState.ReviewingCart, CheckoutEvent.Submit, ({ state }) =>
-    CheckoutState.ChargingCard.derive(state),
+    CheckoutState.ChargingCard.with(state),
+  )
+  .task(
+    CheckoutState.ChargingCard,
+    ({ state }) =>
+      Effect.gen(function* () {
+        const payments = yield* Payments;
+        return yield* payments.charge(state.cartId, state.totalCents);
+      }),
+    {
+      onSuccess: (result) => CheckoutEvent.Charged({ receiptId: result.receiptId }),
+      onFailure: (cause) => CheckoutEvent.Declined({ reason: Cause.pretty(cause) }),
+    },
   )
   .on(CheckoutState.ChargingCard, CheckoutEvent.Charged, ({ state, event }) =>
-    CheckoutState.Confirmed.derive(state, { receiptId: event.receiptId }),
+    CheckoutState.Confirmed.with(state, { receiptId: event.receiptId }),
   )
   .on(CheckoutState.ChargingCard, CheckoutEvent.Declined, ({ state, event }) =>
-    CheckoutState.Failed.derive(state, { reason: event.reason }),
+    CheckoutState.Failed.with(state, { reason: event.reason }),
   )
   .onAny(CheckoutEvent.Cancel, ({ state }) =>
-    CheckoutState.Failed.derive(state, { reason: "cancelled" }),
-  )
-  .spawn(CheckoutState.ChargingCard, ({ slots, state }) =>
-    slots.chargeCard({ cartId: state.cartId, totalCents: state.totalCents }),
+    CheckoutState.Failed.with(state, { reason: "cancelled" }),
   )
   .final(CheckoutState.Confirmed)
   .final(CheckoutState.Failed);
@@ -74,131 +86,86 @@ const checkoutMachine = Machine.make({
 
 A few things to notice:
 
-- Empty variants are values: `State.Idle`. Non-empty are constructors: `State.Loading({ url })`.
-- `State.derive(source, overrides)` carries overlapping fields forward without manual copying.
+- Empty variants are values: `State.Idle`. Non-empty variants are constructors: `State.Loading({ url })`.
+- `State.with(source, overrides)` carries overlapping fields forward without manual copying.
 - `.onAny(...)` is a fallback; a specific `.on(...)` wins.
-- `.spawn(...)` runs work on state entry and cancels it on state exit.
+- `.task(...)` runs work on state entry, sends mapped completion events, and cancels work on state exit.
 
-The builder also supports `.timeout(state, { duration, event })`, `.postpone(state, event)` for buffering, and `.reenter(...)` for re-running lifecycle on same-state transitions.
+The builder also supports `.spawn(...)` for long-lived entry effects, `.background(...)` for actor-lifetime effects, `.timeout(...)`, `.postpone(...)`, and `.reenter(...)`.
 
-## Slots
+## Services And Layers
 
-Slots separate what a machine needs from how the app provides it. Declare them on the machine, provide implementations where you run it.
+State effects use normal Effect services. Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine and required when it runs. Provide implementations with an Effect `Layer`; no per-actor slot map is needed.
 
 ```ts
-const actor =
-  yield *
-  Machine.spawn(checkoutMachine, {
-    slots: {
-      chargeCard: ({ cartId, totalCents }) =>
-        Effect.gen(function* () {
-          const ctx = yield* checkoutMachine.Context;
-          const result = yield* PaymentService.charge(cartId, totalCents);
-          yield* ctx.self.send(
-            result.ok
-              ? CheckoutEvent.Charged({ receiptId: result.receiptId })
-              : CheckoutEvent.Declined({ reason: result.error }),
-          );
-        }),
-    },
-  });
-yield * actor.start;
+const PaymentsLive = Layer.succeed(Payments, {
+  charge: (cartId, totalCents) => Effect.succeed({ receiptId: `rcpt_${cartId}_${totalCents}` }),
+});
+
+const program = Effect.gen(function* () {
+  const actor = yield* Machine.spawn(checkoutMachine);
+  yield* actor.start;
+  yield* actor.send(CheckoutEvent.Submit);
+  return yield* actor.awaitFinal;
+}).pipe(Effect.provide(PaymentsLive));
 ```
 
-The same machine can run with different slot implementations in tests, local apps, or production. Slots are accepted everywhere the machine runs:
-
-- `Machine.spawn(machine, { slots })`
-- `Machine.replay(machine, events, { slots })`
-- `simulate(machine, events, { slots })`
-- `createTestHarness(machine, { slots })`
+Transition handlers remain pure and cannot require services or fail. Use a state effect to perform I/O, then map its result to an event with `.task()`. For continuously running work that can send many events, use `.spawn()` and `ctx.self.send(...)`.
 
 ## Running Actors
 
 `Machine.spawn` allocates an actor but does not start it. Call `actor.start` to fork the event loop, background effects, and spawn effects. Events sent before `start()` are queued.
 
-```ts
-const program = Effect.gen(function* () {
-  const actor = yield* Machine.spawn(checkoutMachine, {
-    slots: {
-      chargeCard: ({ cartId }) =>
-        checkoutMachine.Context.pipe(
-          Effect.flatMap((ctx) =>
-            ctx.self.send(CheckoutEvent.Charged({ receiptId: `rcpt_${cartId}` })),
-          ),
-        ),
-    },
-  });
-  yield* actor.start;
-
-  yield* actor.send(CheckoutEvent.Submit);
-  const finalState = yield* actor.awaitFinal;
-});
-
-Effect.runPromise(Effect.scoped(program));
-```
-
 Key actor operations:
 
-- `start` forks the event loop (idempotent, required after `Machine.spawn`)
+- `start` forks the event loop and entry effects
 - `send(event)` queues and returns immediately
 - `call(event)` returns full transition info
-- `ask(event)` returns a typed domain reply (requires `Event.reply(...)`)
-- `waitFor(...)` / `awaitFinal` for coordination
-- `stop` interrupts now; `drain` processes the remaining queue first
-- `watch(other)` completes when another actor stops
+- `ask(event)` returns a typed domain reply from `Event.reply(...)`
+- `waitFor(...)` and `awaitFinal` coordinate with state changes
+- `stop` interrupts now; `drain` processes remaining queued events first
 
-For named actors or shared lookup, use an actor system. `system.spawn` auto-starts — no `actor.start` needed:
+For named actors or shared lookup, use an actor system. `system.spawn` auto-starts the actor:
 
 ```ts
-import { ActorSystemDefault, ActorSystemService } from "effect-machine";
+import { ActorSystemDefault, ActorSystemService } from "@humanlayer/effect-machine";
 
 const program = Effect.gen(function* () {
   const system = yield* ActorSystemService;
   const actor = yield* system.spawn("checkout-123", checkoutMachine);
   yield* actor.send(CheckoutEvent.Submit);
-}).pipe(Effect.provide(ActorSystemDefault));
-```
-
-### Typed Replies
-
-Events can declare typed reply schemas:
-
-```ts
-const CartEvent = Event({
-  GetTotal: Event.reply({}, Schema.Number),
-});
-
-machine.on(State.Active, CartEvent.GetTotal, ({ state }) => Machine.reply(state, state.totalCents));
-
-const total = yield * actor.ask(CartEvent.GetTotal); // number
+}).pipe(Effect.provide(ActorSystemDefault), Effect.provide(PaymentsLive));
 ```
 
 ## Testing
 
-Test transitions without spawning actors:
+Test state transitions without starting an actor:
 
 ```ts
-import { simulate } from "effect-machine";
+import { simulate } from "@humanlayer/effect-machine";
 
 const result =
   yield *
-  simulate(
-    checkoutMachine,
-    [CheckoutEvent.Submit, CheckoutEvent.Charged({ receiptId: "rcpt_123" })],
-    { slots: { chargeCard: () => Effect.void } },
-  );
+  simulate(checkoutMachine, [
+    CheckoutEvent.Submit,
+    CheckoutEvent.Charged({ receiptId: "rcpt_123" }),
+  ]);
 
-expect(result.states.map((s) => s._tag)).toEqual(["ReviewingCart", "ChargingCard", "Confirmed"]);
+expect(result.states.map((state) => state._tag)).toEqual([
+  "ReviewingCart",
+  "ChargingCard",
+  "Confirmed",
+]);
 ```
 
-`simulate` and `createTestHarness` test transition logic. They do not run `.spawn()` or `.background()` effects.
+`simulate` and `createTestHarness` run transition logic but do not run `.task()`, `.spawn()`, or `.background()` effects.
 
 ## Cluster
 
-When the same machine needs to run behind `@effect/cluster`, turn it into an entity:
+Run the same machine behind `@effect/cluster`:
 
 ```ts
-import { EntityMachine, toEntity } from "effect-machine/cluster";
+import { EntityMachine, toEntity } from "@humanlayer/effect-machine/cluster";
 
 const CheckoutEntity = toEntity(checkoutMachine, { type: "Checkout" });
 
@@ -210,8 +177,8 @@ const CheckoutEntityLayer = EntityMachine.layer(CheckoutEntity, checkoutMachine,
 
 Persistence strategies:
 
-- **Snapshot** — saves state periodically, restores on reactivation
-- **Journal** — appends events on each RPC, replays on reactivation
+- **Snapshot** saves state periodically and restores it on reactivation.
+- **Journal** appends each RPC event and replays it on reactivation.
 
 ## License
 

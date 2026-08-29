@@ -7,7 +7,7 @@
  *
  * @example
  * ```ts
- * import { Slot } from "effect-machine"
+ * import { Slot } from "@humanlayer/effect-machine"
  * import { Schema } from "effect"
  *
  * const MySlots = Slot.define({
@@ -254,7 +254,7 @@ export interface MachineContext<State, Event, Self> {
 export class MachineContextTag extends Context.Service<
   MachineContextTag,
   MachineContext<any, any, any>
->()("effect-machine/slot/MachineContextTag") {}
+>()("@humanlayer/effect-machine/slot/MachineContextTag") {}
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 // ============================================================================
@@ -368,6 +368,7 @@ const of = <D extends SlotsDef>(
 // Slot namespace export
 // ============================================================================
 
+/** @deprecated Prefer Effect `Context.Service` dependencies and `Layer` provisioning. */
 export const Slot = {
   fn,
   define,

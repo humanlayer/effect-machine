@@ -100,17 +100,17 @@
           {
             "target": "service",
             "pattern": "default",
-            "skipLeadingPath": ["src/", "v3/src/"]
+            "skipLeadingPath": ["src/"]
           },
           {
             "target": "error",
             "pattern": "default",
-            "skipLeadingPath": ["src/", "v3/src/"]
+            "skipLeadingPath": ["src/"]
           }
         ],
         "overrides": [
           {
-            "include": ["test/**/*.ts", "v3/test/**/*.ts", "**/test/**/*.ts", "**/*.test.ts"],
+            "include": ["test/**/*.ts", "**/test/**/*.ts", "**/*.test.ts"],
             "options": {
               "diagnosticSeverity": {
                 "anyUnknownInErrorContext": "off",
@@ -123,7 +123,7 @@
             }
           },
           {
-            "include": ["src/slot.ts", "v3/src/slot.ts"],
+            "include": ["src/slot.ts"],
             "options": {
               "diagnosticSeverity": {
                 "anyUnknownInErrorContext": "off"

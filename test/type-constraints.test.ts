@@ -6,7 +6,7 @@
  * Type-level tests for handler constraints.
  *
  * These tests verify that handlers:
- * 1. Cannot require arbitrary services (only Scope for spawn/background)
+ * 1. Keep transition handlers pure while allowing state effects to require services
  * 2. Cannot produce errors
  * 3. Must return machine-scoped state schema
  *
@@ -55,7 +55,7 @@ const _test2 = Machine.make({
 }).on(MyState.Idle, MyEvent.Start, () => WrongState.Other);
 
 // Test 3: Handler cannot produce errors
-class MyError extends Schema.TaggedErrorClass<MyError>()("MyError", {}) {}
+class MyError extends Schema.TaggedError<MyError>()("MyError", {}) {}
 
 const _test3 = Machine.make({
   state: MyState,
@@ -77,15 +77,27 @@ const _test4 = Machine.make({
   .on(MyState.Idle, MyEvent.Start, () => MyState.Loading({ url: "/" }))
   .spawn(MyState.Loading, () => Effect.addFinalizer(() => Effect.log("cleanup")));
 
-// Test 5: spawn handler cannot require arbitrary services
+// Test 5: spawn handler can require a service, which propagates to Machine.spawn
 const _test5 = Machine.make({
   state: MyState,
   event: MyEvent,
   initial: MyState.Idle,
 })
   .on(MyState.Idle, MyEvent.Start, () => MyState.Loading({ url: "/" }))
-  // @ts-expect-error - spawn handler cannot require arbitrary services (MyService not Scope)
-  .spawn(MyState.Loading, () => MyService);
+  .spawn(MyState.Loading, () => MyService.pipe(Effect.asVoid));
+
+const _test5RequiresService: Effect.Effect<unknown, never, MyService> = Machine.spawn(_test5);
+
+// Test 6: task handler can require a service, which also propagates to Machine.spawn
+const _test6 = Machine.make({
+  state: MyState,
+  event: MyEvent,
+  initial: MyState.Loading({ url: "/" }),
+}).task(MyState.Loading, () => MyService, {
+  onSuccess: () => MyEvent.Complete,
+});
+
+const _test6RequiresService: Effect.Effect<unknown, never, MyService> = Machine.spawn(_test6);
 
 // ============================================================================
 // Reply Schema Type Constraints
@@ -102,8 +114,8 @@ const ReplyState = State({
   Done: {},
 });
 
-// Test 6: Handler for reply-bearing event MUST return Machine.reply()
-const _test6 = Machine.make({
+// Test 7: Handler for reply-bearing event MUST return Machine.reply()
+const _test7 = Machine.make({
   state: ReplyState,
   event: ReplyEvent,
   initial: ReplyState.Active({ count: 0 }),
@@ -111,24 +123,24 @@ const _test6 = Machine.make({
   Machine.reply(ReplyState.Active({ count: state.count }), state.count),
 );
 
-// Test 7: Handler for reply-bearing event CANNOT return plain state
-const _test7 = Machine.make({
+// Test 8: Handler for reply-bearing event CANNOT return plain state
+const _test8 = Machine.make({
   state: ReplyState,
   event: ReplyEvent,
   initial: ReplyState.Active({ count: 0 }),
   // @ts-expect-error - reply-bearing event requires Machine.reply(), not plain state
 }).on(ReplyState.Active, ReplyEvent.GetCount, () => ReplyState.Active({ count: 0 }));
 
-// Test 8: Handler for non-reply event CANNOT return Machine.reply()
-const _test8 = Machine.make({
+// Test 9: Handler for non-reply event CANNOT return Machine.reply()
+const _test9 = Machine.make({
   state: ReplyState,
   event: ReplyEvent,
   initial: ReplyState.Active({ count: 0 }),
   // @ts-expect-error - non-reply event handler cannot return Machine.reply()
 }).on(ReplyState.Active, ReplyEvent.Fire, () => Machine.reply(ReplyState.Done, 42));
 
-// Test 9: Machine.reply() type must match schema
-const _test9 = Machine.make({
+// Test 10: Machine.reply() type must match schema
+const _testReplyValue = Machine.make({
   state: ReplyState,
   event: ReplyEvent,
   initial: ReplyState.Active({ count: 0 }),
@@ -137,7 +149,7 @@ const _test9 = Machine.make({
   Machine.reply(ReplyState.Active({ count: state.count }), "not a number"),
 );
 
-// Test 9b: reply-bearing constructors accept plain payload fields, not hidden reply metadata
+// Test 10b: reply-bearing constructors accept plain payload fields, not hidden reply metadata
 const PayloadReplyEvent = Event({
   GetById: Event.reply({ id: Schema.String }, Schema.Number),
 });

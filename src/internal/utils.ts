@@ -34,7 +34,7 @@ export type TaggedConstructor<T extends { readonly _tag: string }> = (args: Omit
 // Reply Result (branded replacement for duck-typed { state, reply })
 // ============================================================================
 
-const ReplyResultSymbol: unique symbol = Symbol.for("effect-machine/ReplyResult");
+const ReplyResultSymbol: unique symbol = Symbol.for("@humanlayer/effect-machine/ReplyResult");
 export type ReplyResultSymbol = typeof ReplyResultSymbol;
 
 /**
@@ -66,7 +66,7 @@ export const isReplyResult = (value: unknown): value is ReplyResult<unknown, unk
 // DeferReplyResult — signal that spawn handler will reply later
 // ============================================================================
 
-const DeferReplySymbol: unique symbol = Symbol.for("effect-machine/DeferReply");
+const DeferReplySymbol: unique symbol = Symbol.for("@humanlayer/effect-machine/DeferReply");
 export type DeferReplySymbol = typeof DeferReplySymbol;
 
 /**

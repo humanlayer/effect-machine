@@ -1,4 +1,4 @@
-# effect-machine
+# @humanlayer/effect-machine
 
 Type-safe state machines for Effect.
 
@@ -7,7 +7,7 @@ Type-safe state machines for Effect.
 ```bash
 bun run gate          # typecheck + lint + test + build
 bun test              # Run tests
-bun run typecheck     # tsgo --noEmit for v4 and v3, patched by @effect/tsgo
+bun run typecheck     # tsgo --noEmit, patched by @effect/tsgo
 bun run lint          # type-aware oxlint; Effect diagnostics run through tsgo plugin
 bun run fmt           # oxfmt
 ```
@@ -20,9 +20,9 @@ bun run fmt           # oxfmt
 - Non-empty: `State.Loading({ url })` - constructor requiring args
 - Machine creation: `Machine.make({ state, event, initial })` - types inferred
 - Exports: all public API via `src/index.ts`
-- Namespace pattern: `import { Machine } from "effect-machine"` then `Machine.make`, etc.
-- v4 services use `class X extends Context.Service<X, Shape>()("key") {}`; keep `serviceNotAsClass` enabled.
-- `effect` stays peer-only at runtime; keep concrete Effect versions in dev deps for validation.
+- Namespace pattern: `import { Machine } from "@humanlayer/effect-machine"` then `Machine.make`, etc.
+- Services use `class X extends Context.Service<X, Shape>()("key") {}`; keep `serviceNotAsClass` enabled.
+- `effect` stays peer-only at runtime; keep a concrete Effect version in dev deps for validation.
 
 ## Fluent Builder
 
@@ -31,7 +31,7 @@ const machine = Machine.make({ state, event, initial })
   .on(State.Idle, Event.Start, () => State.Running)
   .on([State.Draft, State.Review], Event.Cancel, () => State.Cancelled) // multi-state
   .onAny(Event.Reset, () => State.Idle) // wildcard (any state)
-  .spawn(State.Running, ({ slots }) => slots.poll())
+  .spawn(State.Running, ({ self }) => poll().pipe(Effect.andThen(self.send(Event.Polled))))
   .timeout(State.Loading, { duration: Duration.seconds(30), event: Event.Timeout })
   .postpone(State.Connecting, Event.Data)
   .final(State.Done);
@@ -61,61 +61,47 @@ Async work that emits an event on completion:
 .task([State.Loading, State.Retrying], ({ state }) => fetchData(state.url), { onSuccess: ... })
 ```
 
-## State.derive()
+## State.with()
 
 Construct state from existing source. Per-variant and union-level:
 
 ```ts
 // Per-variant: target-specific, works cross-state
-State.Active.derive(state, { count: state.count + 1 });
-State.Shipped.derive(processingState, { trackingId: "TRACK-123" });
-State.Idle.derive(anyState); // → { _tag: "Idle" }
+State.Active.with(state, { count: state.count + 1 });
+State.Shipped.with(processingState, { trackingId: "TRACK-123" });
+State.Idle.with(anyState); // -> { _tag: "Idle" }
 
 // Union-level: dispatches by _tag, preserves specific variant subtype
-const updated = MyState.derive(state, { queue: newQueue });
+const updated = MyState.with(state, { queue: newQueue });
 // If state is Streaming, returns Streaming (not union type)
 // Partial keys not in target variant are silently dropped
 ```
 
-## Slots
+## Services And Layers
 
-Unified parameterized slots via `Slot.define` + `Slot.fn`. Handlers take only params (no ctx parameter):
+State effects use normal Effect services. Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine and supplied when it runs. Transition handlers remain pure.
 
 ```ts
-const MySlots = Slot.define({
-  canRetry: Slot.fn({ max: Schema.Number }, Schema.Boolean),
-  fetch: Slot.fn({ url: Schema.String }),
-});
+class ReplicationOperations extends Context.Service<
+  ReplicationOperations,
+  { readonly open: () => Effect.Effect<void> }
+>()("@app/ReplicationOperations") {}
 
-const machine = Machine.make({ state, event, slots: MySlots, initial }).on(
-  State.X,
-  Event.Y,
-  ({ slots }) =>
-    Effect.gen(function* () {
-      if (yield* slots.canRetry({ max: 3 })) {
-        yield* slots.fetch({ url: "/api" });
-      }
-      return State.Z;
-    }),
-);
+const machine = Machine.make({ state, event, initial })
+  .on(State.Idle, Event.Start, () => State.Connecting)
+  .task(
+    State.Connecting,
+    () =>
+      Effect.gen(function* () {
+        const operations = yield* ReplicationOperations;
+        yield* operations.open();
+      }),
+    { onSuccess: () => Event.Connected },
+  );
 
-// Provide slot implementations at spawn time — handlers take only params
-const actor =
-  yield *
-  Machine.spawn(machine, {
-    slots: {
-      canRetry: ({ max }) => attempts < max,
-      fetch: ({ url }) => Http.get(url),
-    },
-  });
+const OperationsLive = Layer.succeed(ReplicationOperations, { open: () => Effect.void });
+const actor = yield * Machine.spawn(machine).pipe(Effect.provide(OperationsLive));
 yield * actor.start;
-
-// When a handler needs machine state, access via service
-Machine.spawn(machine, {
-  slots: {
-    canRetry: ({ max }) => machine.Context.pipe(Effect.map((ctx) => ctx.state.attempts < max)),
-  },
-});
 ```
 
 ## Running Machines
@@ -184,7 +170,7 @@ yield * actor.start;
 Actors can automatically restart on defect with `Supervision.restart()`:
 
 ```ts
-import { Supervision } from "effect-machine";
+import { Supervision } from "@humanlayer/effect-machine";
 
 const actor =
   yield *
@@ -277,15 +263,15 @@ const count = yield* actor.ask(Event.GetCount);  // number
 
 ## Handler Type Constraints
 
-| Method                       | Allowed R | Why                                   |
-| ---------------------------- | --------- | ------------------------------------- |
-| `.on()` / `.reenter()`       | `never`   | Pure transitions, no services         |
-| `.spawn()` / `.background()` | `Scope`   | Finalizers allowed                    |
-| `spawn(..., { slots })`      | Any R     | Slot implementations can use services |
+| Method                 | Allowed R | Why                           |
+| ---------------------- | --------- | ----------------------------- | ---------------------------------- |
+| `.on()` / `.reenter()` | `never`   | Pure transitions, no services |
+| `.task()` / `.spawn()` | `Scope    | R`                            | State-scoped work can use services |
+| `.background()`        | `Scope    | R`                            | Lifetime work can use services     |
 
-- Handlers cannot require arbitrary services — use slots
-- Handlers cannot produce errors — error channel fixed to `never`
-- Handlers must return machine's state schema — wrong states rejected at compile time
+- Transition handlers cannot require services or produce errors.
+- State effects map failures to events with `.task()` or handle them in `.spawn()`.
+- State-effect service requirements propagate to `Machine.spawn` and `system.spawn`.
 
 ## Gotchas
 
@@ -297,6 +283,7 @@ const count = yield* actor.ask(Event.GetCount);  // number
 - Empty structs: `State.Idle` not `State.Idle()`
 - `.onAny()` only fires when no specific `.on()` matches
 - `self.spawn` errors with `DuplicateActorError` — wrap with `Effect.orDie`
+- Provide state-effect services with `Effect.provide(MyLayer)` around actor creation.
 - Sync helpers live on `actor.sync.*`
 - Pending `call`/`ask` Deferreds settled with `ActorStoppedError` on stop
 - `ask()` only accepts events with `Event.reply()` — non-reply events are a type error
@@ -307,7 +294,7 @@ const count = yield* actor.ask(Event.GetCount);  // number
 Wire machines to `@effect/cluster` for distributed actors:
 
 ```ts
-import { toEntity, EntityMachine } from "effect-machine/cluster";
+import { toEntity, EntityMachine } from "@humanlayer/effect-machine/cluster";
 
 const OrderEntity = toEntity(orderMachine, { type: "Order" });
 const OrderEntityLayer = EntityMachine.layer(OrderEntity, orderMachine, {

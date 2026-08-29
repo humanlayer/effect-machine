@@ -9,7 +9,7 @@
  *
  * @example
  * ```ts
- * import { State, Event, Machine } from "effect-machine"
+ * import { State, Event, Machine } from "@humanlayer/effect-machine"
  *
  * // Define schema-first state
  * const OrderState = State({
@@ -43,7 +43,7 @@ import { InvalidSchemaError, MissingMatchHandlerError } from "./errors.js";
 // Reply Schema Symbol
 // ============================================================================
 
-const ReplySchemaSymbol: unique symbol = Symbol.for("effect-machine/ReplySchema");
+const ReplySchemaSymbol: unique symbol = Symbol.for("@humanlayer/effect-machine/ReplySchema");
 export type ReplySchemaSymbol = typeof ReplySchemaSymbol;
 
 /**

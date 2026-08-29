@@ -1,13 +1,12 @@
 {
-  "name": "effect-machine",
+  "name": "@humanlayer/effect-machine",
   "version": "0.17.1",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cevr/effect-machine.git"
+    "url": "https://github.com/humanlayer/effect-machine.git"
   },
   "files": [
-    "dist",
-    "v3/dist"
+    "dist"
   ],
   "type": "module",
   "exports": {
@@ -22,38 +21,23 @@
         "types": "./dist/cluster/index.d.ts",
         "default": "./dist/cluster/index.js"
       }
-    },
-    "./v3": {
-      "import": {
-        "types": "./v3/dist/index.d.ts",
-        "default": "./v3/dist/index.js"
-      }
-    },
-    "./v3/cluster": {
-      "import": {
-        "types": "./v3/dist/cluster/index.d.ts",
-        "default": "./v3/dist/cluster/index.js"
-      }
     }
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "typecheck": "concurrently -n v4,v3 -c blue,magenta \"tsgo --noEmit\" \"bun run typecheck:v3\"",
-    "typecheck:v3": "tsgo --noEmit -p v3/tsconfig.json",
+    "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "test": "bun test --tsconfig-override=tsconfig.json",
-    "test:v3": "cd v3 && bun test --tsconfig-override=tsconfig.json ./test/",
     "test:watch": "bun test --watch",
-    "test:all": "bun run test && bun run test:v3",
-    "gate": "concurrently -n type,lint,fmt,test,build -c blue,yellow,magenta,green,cyan \"bun run typecheck\" \"bun run lint:fix\" \"bun run fmt\" \"bun run test:all\" \"bun run build\"",
+    "gate": "concurrently -n type,lint,fmt,test,build -c blue,yellow,magenta,green,cyan \"bun run typecheck\" \"bun run lint:fix\" \"bun run fmt\" \"bun run test\" \"bun run build\"",
     "prepare": "lefthook install && effect-tsgo patch",
     "version": "changeset version",
-    "build": "concurrently -n v4,v3 -c cyan,magenta \"bun --bun tsdown\" \"bun --bun tsdown --config v3/tsdown.config.ts\"",
+    "build": "bun --bun tsdown",
     "release": "bun run build && changeset publish"
   },
   "devDependencies": {
@@ -62,21 +46,21 @@
     "@effect/cluster": "0.58.2",
     "@effect/rpc": "0.75.1",
     "@effect/tsgo": "0.5.2",
+    "@oxlint/plugins": "1.78.0",
     "@types/bun": "1.3.12",
     "@typescript/native-preview": "7.0.0-dev.20260507.1",
     "concurrently": "^9.2.1",
-    "effect": "4.0.0-beta.64",
+    "effect": "4.0.0-beta.107",
     "effect-bun-test": "0.3.0",
-    "effect-v3": "npm:effect@3.21.2",
     "lefthook": "^2.1.5",
     "oxfmt": "^0.44.0",
-    "oxlint": "^1.63.0",
-    "oxlint-tsgolint": "^0.22.1",
+    "oxlint": "1.78.0",
+    "oxlint-tsgolint": "7.0.2001",
     "tsdown": "^0.21.7",
     "typescript": "^6.0.2"
   },
   "peerDependencies": {
-    "effect": ">=4.0.0-beta.64"
+    "effect": "^4.0.0-beta.107"
   },
   "peerDependenciesMeta": {
     "effect": {

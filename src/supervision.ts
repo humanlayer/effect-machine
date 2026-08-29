@@ -119,14 +119,14 @@ export namespace Supervision {
       const recurs = Schedule.recurs(options.maxRestarts);
       if (options.within !== undefined) {
         // Reset the counter within the time window
-        schedule = Schedule.both(recurs, Schedule.windowed(options.within));
+        schedule = Schedule.max([recurs, Schedule.windowed(options.within)]);
       } else {
         schedule = recurs;
       }
     }
 
     if (options?.backoff !== undefined) {
-      schedule = Schedule.both(schedule, options.backoff);
+      schedule = Schedule.max([schedule, options.backoff]);
     }
 
     return { schedule };

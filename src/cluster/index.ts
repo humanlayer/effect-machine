@@ -7,8 +7,8 @@
  *
  * @example
  * ```ts
- * import { Machine, MachineSchema } from "effect-machine"
- * import { toEntity, EntityMachine } from "effect-machine/cluster"
+ * import { Machine, MachineSchema } from "@humanlayer/effect-machine"
+ * import { toEntity, EntityMachine } from "@humanlayer/effect-machine/cluster"
  *
  * // Schema-first definitions
  * const OrderState = MachineSchema.State({
