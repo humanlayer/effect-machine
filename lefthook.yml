@@ -11,3 +11,13 @@ pre-commit:
       run: bun run typecheck
     - name: test
       run: bun run test
+
+pre-push:
+  parallel: true
+  jobs:
+    - name: fmt
+      run: bun run fmt:check
+    - name: lint
+      run: bun run lint
+    - name: typecheck
+      run: bun run typecheck
