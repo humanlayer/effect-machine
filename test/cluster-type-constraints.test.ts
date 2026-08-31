@@ -21,7 +21,7 @@ const ClusterEvent = Event({
 class ClusterService extends Context.Service<
   ClusterService,
   { readonly run: Effect.Effect<void> }
->()("@test/ClusterService") {}
+>()("@humanlayer/effect-machine/test/cluster-type-constraints.test/ClusterService") {}
 
 const clusterMachine = Machine.make({
   state: ClusterState,

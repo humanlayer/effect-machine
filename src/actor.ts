@@ -450,29 +450,30 @@ export const buildActorRefCore = <
     return result;
   });
 
-  const ask = <ReplyEvent extends E & ReplyTypeBrand<unknown>>(event: ReplyEvent) =>
-    Effect.gen(function* () {
-      const registeredSchema = machine.replySchemas.get(event._tag);
-      if (registeredSchema === undefined) {
-        return yield* new NoReplyError({ actorId: id, eventTag: event._tag });
-      }
+  const ask = Effect.fn("effect-machine.actor.ask")(function* <
+    ReplyEvent extends E & ReplyTypeBrand<unknown>,
+  >(event: ReplyEvent) {
+    const registeredSchema = machine.replySchemas.get(event._tag);
+    if (registeredSchema === undefined) {
+      return yield* new NoReplyError({ actorId: id, eventTag: event._tag });
+    }
 
-      const stopped = yield* Ref.get(stoppedRef);
-      if (stopped) {
-        return yield* new ActorStoppedError({ actorId: id });
-      }
+    const stopped = yield* Ref.get(stoppedRef);
+    if (stopped) {
+      return yield* new ActorStoppedError({ actorId: id });
+    }
 
-      const reply = yield* Deferred.make<unknown, NoReplyError | ActorStoppedError>();
-      const pending = pendingReply(reply);
-      pendingReplies.add(pending);
-      const q = yield* Ref.get(eventQueueRef);
-      yield* Queue.offer(q, { _tag: "ask", event, reply });
-      const input: unknown = yield* Deferred.await(reply).pipe(
-        Effect.ensuring(Effect.sync(() => pendingReplies.delete(pending))),
-      );
-      const decoder = Schema.make<Schema.Decoder<ExtractReply<ReplyEvent>>>(registeredSchema.ast);
-      return yield* Schema.decodeUnknownEffect(decoder)(input).pipe(Effect.orDie);
-    }).pipe(Effect.withSpan("effect-machine.actor.ask"));
+    const reply = yield* Deferred.make<unknown, NoReplyError | ActorStoppedError>();
+    const pending = pendingReply(reply);
+    pendingReplies.add(pending);
+    const q = yield* Ref.get(eventQueueRef);
+    yield* Queue.offer(q, { _tag: "ask", event, reply });
+    const input: unknown = yield* Deferred.await(reply).pipe(
+      Effect.ensuring(Effect.sync(() => pendingReplies.delete(pending))),
+    );
+    const decoder = Schema.make<Schema.Decoder<ExtractReply<ReplyEvent>>>(registeredSchema.ast);
+    return yield* Schema.decodeUnknownEffect(decoder)(input).pipe(Effect.orDie);
+  });
 
   const snapshot = SubscriptionRef.get(stateRef).pipe(
     Effect.withSpan("effect-machine.actor.snapshot"),

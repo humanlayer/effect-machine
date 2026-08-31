@@ -684,6 +684,7 @@ export class Machine<
         phase: "start",
       });
 
+      // @effect-diagnostics anyUnknownInErrorContext:off -- the public task overloads preserve concrete error and requirement channels at this implementation boundary
       const exit = yield* Effect.exit(run(ctx));
 
       if (Exit.isSuccess(exit)) {
