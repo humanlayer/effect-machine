@@ -13,9 +13,8 @@
  * All "bad" tests use @ts-expect-error on the handler return expression.
  */
 import { Effect, Schema, Context } from "effect";
-import { Machine, State, Event, Slot } from "../src/index.js";
+import { Machine, State, Event } from "../src/index.js";
 import type { ActorHandle } from "../src/index.js";
-import type { ProvideSlots } from "../src/slot.js";
 
 const MyState = State({
   Idle: {},
@@ -206,95 +205,6 @@ const PayloadReplyEvent = Event({
 const _test9bPayload: Parameters<typeof PayloadReplyEvent.GetById>[0] = { id: "task-1" };
 const _test9b = PayloadReplyEvent.GetById(_test9bPayload);
 const _test9bId: string = _test9b.id;
-
-// ============================================================================
-// Slot Type Safety Regression Tests
-// ============================================================================
-
-const MySlots = Slot.define({
-  canRetry: Slot.fn({ max: Schema.Number }, Schema.Boolean),
-  fetchData: Slot.fn({ url: Schema.String }),
-  computeValue: Slot.fn({ input: Schema.Number }, Schema.Number),
-});
-type MySlotsDef = typeof MySlots.definitions;
-
-// Test 10: Slots are accessible via `slots` in handler context
-const _test10 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  slots: MySlots,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) =>
-  Effect.gen(function* () {
-    const canRetry = yield* slots.canRetry({ max: 3 });
-    if (canRetry) {
-      yield* slots.fetchData({ url: "/" });
-    }
-    return MyState.Loading({ url: "/" });
-  }),
-);
-
-// Test 11: Slot call with wrong param type is rejected
-const _test11 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  slots: MySlots,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) =>
-  Effect.gen(function* () {
-    // @ts-expect-error - max should be number, not string
-    yield* slots.canRetry({ max: "not a number" });
-    return MyState.Loading({ url: "/" });
-  }),
-);
-
-// Test 12: Slot return type is enforced
-const _test12 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  slots: MySlots,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) =>
-  Effect.gen(function* () {
-    // computeValue returns number, assigning to string should fail
-    // @ts-expect-error - computeValue returns number, not string
-    const _v: string = yield* slots.computeValue({ input: 42 });
-    return MyState.Loading({ url: "/" });
-  }),
-);
-
-// Test 13: ProvideSlots requires all slots to be implemented
-// @ts-expect-error - missing 'computeValue' property
-const _test13: ProvideSlots<MySlotsDef> = {
-  canRetry: ({ max }) => max > 0,
-  fetchData: ({ url }) => Effect.log(url),
-};
-
-// Test 14: ProvideSlots rejects wrong handler param types
-const _test14: ProvideSlots<MySlotsDef> = {
-  // @ts-expect-error - max should be number, handler expects string
-  canRetry: ({ max }: { max: string }) => max.length > 0,
-  fetchData: ({ url }) => Effect.log(url),
-  computeValue: ({ input }) => input * 2,
-};
-
-// Test 15: ProvideSlots accepts valid implementations (should compile)
-const _test15: ProvideSlots<MySlotsDef> = {
-  canRetry: ({ max }) => max > 0,
-  fetchData: ({ url }) => Effect.log(url),
-  computeValue: ({ input }) => input * 2,
-};
-
-// Test 16: Machine without slots — handler context has empty slots
-const _test16 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) => {
-  // @ts-expect-error - no slots defined, canRetry doesn't exist
-  const _x = slots.canRetry;
-  return MyState.Loading({ url: "/" });
-});
 
 // This file should compile with all @ts-expect-error comments being valid
 export {};

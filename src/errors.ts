@@ -34,24 +34,6 @@ export class MissingMatchHandlerError extends Schema.TaggedError<MissingMatchHan
   { tag: Schema.String },
 ) {}
 
-/** Slot handler not found at runtime (internal error) */
-export class SlotProvisionError extends Schema.TaggedError<SlotProvisionError>()(
-  "SlotProvisionError",
-  {
-    slotName: Schema.String,
-    slotType: Schema.Literal("slot"),
-  },
-) {}
-
-/** Slot provision validation failed — missing or extra handlers */
-export class ProvisionValidationError extends Schema.TaggedError<ProvisionValidationError>()(
-  "ProvisionValidationError",
-  {
-    missing: Schema.Array(Schema.String),
-    extra: Schema.Array(Schema.String),
-  },
-) {}
-
 /** Assertion failed in testing utilities */
 export class AssertionError extends Schema.TaggedError<AssertionError>()("AssertionError", {
   message: Schema.String,
@@ -71,13 +53,6 @@ export class NoReplyError extends Schema.TaggedError<NoReplyError>()("NoReplyErr
 
 /** Persistence adapter operation failed */
 export class PersistenceError extends Schema.TaggedError<PersistenceError>()("PersistenceError", {
-  message: Schema.String,
-}) {}
-
-/** Slot input/output schema validation failed */
-export class SlotCodecError extends Schema.TaggedError<SlotCodecError>()("SlotCodecError", {
-  slotName: Schema.String,
-  phase: Schema.Literals(["input", "output"]),
   message: Schema.String,
 }) {}
 

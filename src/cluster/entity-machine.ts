@@ -22,7 +22,7 @@ import {
   Option,
   Queue,
   Ref,
-  type Schema,
+  Schema,
   type Schedule,
   Stream,
   SubscriptionRef,
@@ -207,7 +207,7 @@ function layer<
     const computedInitial = initialState ?? machine.initial;
     const stateRef = yield* SubscriptionRef.make(computedInitial);
     const stoppedRef = yield* Ref.make(false);
-    const eventQueue = yield* Queue.unbounded<RuntimeQueuedEvent<E>>();
+    const eventQueue = yield* Queue.unbounded<RuntimeQueuedEvent<S, E>>();
 
     // Create runtime kernel — single queue, sequential processing
     const runtime = yield* createRuntime(machine, system, {
@@ -217,6 +217,7 @@ function layer<
       childIdPrefix: `${entityId}/`,
       cellResources: { stateRef, stoppedRef, eventQueue },
     });
+    yield* Effect.addFinalizer(() => runtime.stop);
     yield* runtime.start;
 
     // ----------------------------------------------------------------
@@ -235,11 +236,14 @@ function layer<
             Effect.gen(function* () {
               const version = yield* Ref.get(versionRef);
               const now = yield* Clock.currentTimeMillis;
+              const encodedState = yield* Schema.encodeEffect(entity.stateSchema)(state).pipe(
+                Effect.orDie,
+              );
               yield* pAdapter.saveSnapshot(key, {
-                state,
+                state: encodedState,
                 version,
                 timestamp: now,
-              } satisfies Snapshot<S>);
+              });
             }).pipe(Effect.catch(() => Effect.void)),
           ),
           Effect.forkScoped,
@@ -254,11 +258,14 @@ function layer<
           const state = yield* SubscriptionRef.get(runtime.stateRef);
           const version = yield* Ref.get(versionRef);
           const now = yield* Clock.currentTimeMillis;
+          const encodedState = yield* Schema.encodeEffect(entity.stateSchema)(state).pipe(
+            Effect.orDie,
+          );
           yield* pAdapter.saveSnapshot(key, {
-            state,
+            state: encodedState,
             version,
             timestamp: now,
-          } satisfies Snapshot<S>);
+          });
         }).pipe(Effect.catch(() => Effect.void)),
       );
     }
@@ -272,7 +279,6 @@ function layer<
             ? { adapter: persistCtx.adapter, key: persistCtx.key }
             : undefined;
 
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           const request = yield* Queue.take(mailbox);
           const tag = request.tag;
@@ -286,7 +292,13 @@ function layer<
 
               if (journalCtx !== undefined) {
                 // Journal append — inline, before replying. Defects entity on failure.
-                yield* persistEvent(journalCtx.adapter, journalCtx.key, versionRef, event);
+                yield* persistEvent(
+                  journalCtx.adapter,
+                  journalCtx.key,
+                  versionRef,
+                  entity.eventSchema,
+                  event,
+                );
               } else if (hasPersistence) {
                 // Snapshot-only: bump version for consistent snapshot versioning
                 yield* Ref.update(versionRef, (v) => v + 1);
@@ -302,7 +314,13 @@ function layer<
               const reply = yield* runtime.ask(event).pipe(Effect.orDie);
 
               if (journalCtx !== undefined) {
-                yield* persistEvent(journalCtx.adapter, journalCtx.key, versionRef, event);
+                yield* persistEvent(
+                  journalCtx.adapter,
+                  journalCtx.key,
+                  versionRef,
+                  entity.eventSchema,
+                  event,
+                );
               } else if (hasPersistence) {
                 yield* Ref.update(versionRef, (v) => v + 1);
               }
@@ -383,10 +401,14 @@ const hydratePersistence = <
   E extends { readonly _tag: string },
 >(
   persistence: EntityPersistenceConfig | undefined,
-  entityDef: { readonly type: string },
+  entityDef: {
+    readonly type: string;
+    readonly stateSchema: Schema.Codec<S>;
+    readonly eventSchema: Schema.Codec<E>;
+  },
   entityId: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Machine type params need wide acceptance
-  machine: Machine<S, E, any, any, any, any>,
+  machine: Machine<S, E, any, any, any>,
   initializeState?: (entityId: string) => S,
 ) =>
   Effect.gen(function* () {
@@ -396,11 +418,23 @@ const hydratePersistence = <
     const entityType = persistence.machineType ?? entityDef.type;
     const key: PersistenceKey = { entityType, entityId };
 
-    // Load snapshot
-    // SAFETY: this persistence key belongs to a machine whose state schema is S.
-    const maybeSnapshot = yield* adapter.loadSnapshot(key) as Effect.Effect<
-      Option.Option<Snapshot<S>>
-    >;
+    const snapshotSchema = Schema.Struct({
+      state: entityDef.stateSchema,
+      version: Schema.Number,
+      timestamp: Schema.Number,
+    });
+    const persistedEventSchema = Schema.Struct({
+      event: entityDef.eventSchema,
+      version: Schema.Number,
+      timestamp: Schema.Number,
+    });
+
+    const storedSnapshot = yield* adapter.loadSnapshot(key);
+    const maybeSnapshot = yield* Option.match(storedSnapshot, {
+      onNone: () => Effect.succeed(Option.none<Snapshot<S>>()),
+      onSome: (input) =>
+        Schema.decodeUnknownEffect(snapshotSchema)(input).pipe(Effect.map(Option.some)),
+    });
 
     const strategy = persistence.strategy ?? "snapshot";
 
@@ -412,10 +446,10 @@ const hydratePersistence = <
           : machine.initial;
       const snapshotVersion = Option.isSome(maybeSnapshot) ? maybeSnapshot.value.version : 0;
 
-      // SAFETY: journal entries for this persistence key were written from events of E.
-      const events = (yield* adapter.loadEvents(key, snapshotVersion)) as ReadonlyArray<
-        PersistedEvent<E>
-      >;
+      const storedEvents = yield* adapter.loadEvents(key, snapshotVersion);
+      const events = yield* Effect.forEach(storedEvents, (input) =>
+        Schema.decodeUnknownEffect(persistedEventSchema)(input),
+      );
 
       if (events.length > 0) {
         const eventValues = events.map((e: PersistedEvent<E>) => e.event);
@@ -459,14 +493,16 @@ const persistEvent = <E>(
   adapter: PersistenceAdapterService,
   key: PersistenceKey,
   versionRef: Ref.Ref<number>,
+  eventSchema: Schema.Codec<E>,
   event: E,
 ): Effect.Effect<void, never, never> =>
   Effect.gen(function* () {
     const expectedVersion = yield* Ref.get(versionRef);
     const newVersion = expectedVersion + 1;
     const now = yield* Clock.currentTimeMillis;
+    const encodedEvent = yield* Schema.encodeEffect(eventSchema)(event).pipe(Effect.orDie);
     const persisted: PersistedEvent<unknown> = {
-      event,
+      event: encodedEvent,
       version: newVersion,
       timestamp: now,
     };

@@ -1,4 +1,3 @@
-// eslint-disable-next-line eslint-plugin-import/namespace -- false positive: Brand is a type namespace in effect
 import type { Brand } from "effect";
 
 // String-based type IDs for branding (v4 Brand requires string keys)
@@ -56,4 +55,4 @@ export type ExtractReply<E> = E extends ReplyTypeBrand<infer R> ? R : never;
  */
 export type TaggedOrConstructor<T extends { readonly _tag: string }> =
   | T
-  | ((...args: never[]) => T);
+  | (((...args: never[]) => T) & { readonly _tag: T["_tag"] });

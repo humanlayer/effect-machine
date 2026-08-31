@@ -1,14 +1,7 @@
 // @effect-diagnostics strictEffectProvide:off - tests are entry points
 import { Effect, Option } from "effect";
 
-import {
-  ActorSystemDefault,
-  ActorSystemService,
-  Machine,
-  State,
-  Event,
-  Slot,
-} from "../src/index.js";
+import { ActorSystemDefault, ActorSystemService, Machine, State, Event } from "../src/index.js";
 import { describe, expect, it, yieldFibers } from "effect-bun-test";
 
 // ============================================================================
@@ -363,39 +356,28 @@ describe("Child Actor Support", () => {
     );
   });
 
-  describe("slot handler self.spawn", () => {
-    it.scopedLive("build() slot handler can spawn children", () =>
+  describe("state effect self.spawn", () => {
+    it.scopedLive("spawn handler can spawn children", () =>
       Effect.gen(function* () {
-        const SpawnSlots = Slot.define({
-          spawnWorker: Slot.fn({}),
-        });
-
         const parentMachine = Machine.make({
           state: ParentState,
           event: ParentEvent,
-          slots: SpawnSlots,
           initial: ParentState.Idle,
         })
           .on(ParentState.Idle, ParentEvent.Activate, () => ParentState.Active)
-          .spawn(ParentState.Active, ({ slots }) => slots.spawnWorker())
+          .spawn(ParentState.Active, ({ self }) =>
+            self.spawn("state-child", childMachine).pipe(Effect.asVoid, Effect.orDie),
+          )
           .final(ParentState.Done);
 
-        const parent = yield* Machine.spawn(parentMachine, {
-          slots: {
-            spawnWorker: () =>
-              Effect.gen(function* () {
-                const ctx = yield* parentMachine.Context;
-                yield* ctx.self.spawn("slot-child", childMachine).pipe(Effect.asVoid, Effect.orDie);
-              }),
-          },
-        });
+        const parent = yield* Machine.spawn(parentMachine);
         yield* parent.start;
         yield* parent.send(ParentEvent.Activate);
         yield* Effect.yieldNow;
         yield* yieldFibers;
         yield* Effect.sleep("50 millis");
 
-        const child = yield* parent.system.get("slot-child");
+        const child = yield* parent.system.get("state-child");
         expect(Option.isSome(child)).toBe(true);
 
         yield* parent.stop;

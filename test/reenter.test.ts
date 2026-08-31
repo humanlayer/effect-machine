@@ -2,14 +2,7 @@
 import { Effect, Schema, SubscriptionRef } from "effect";
 import { TestClock } from "effect/testing";
 
-import {
-  ActorSystemDefault,
-  ActorSystemService,
-  Event,
-  Machine,
-  Slot,
-  State,
-} from "../src/index.js";
+import { ActorSystemDefault, ActorSystemService, Event, Machine, State } from "../src/index.js";
 import { describe, expect, it, yieldFibers } from "effect-bun-test";
 
 describe("Same-state Transitions", () => {
@@ -121,10 +114,6 @@ describe("Reenter Transitions", () => {
     Finish: {},
   });
 
-  const PollSlots = Slot.define({
-    runPollingEffect: Slot.fn({}),
-  });
-
   it.scopedLive("reenter runs exit/enter for same state tag", () =>
     Effect.gen(function* () {
       const effects: string[] = [];
@@ -185,23 +174,17 @@ describe("Reenter Transitions", () => {
       const machine = Machine.make({
         state: PollState,
         event: PollEvent,
-        slots: PollSlots,
         initial: PollState.Polling({ attempts: 0 }),
       })
         .on(PollState.Polling, PollEvent.Poll, () => PollState.Done)
         .reenter(PollState.Polling, PollEvent.Reset, ({ state }) =>
           PollState.Polling.with(state, { attempts: state.attempts + 1 }),
         )
-        .task(PollState.Polling, ({ slots }) => slots.runPollingEffect(), {
+        .task(PollState.Polling, () => Effect.sleep("5 seconds"), {
           onSuccess: () => PollEvent.Poll,
         });
 
-      const actor = yield* Machine.spawn(machine, {
-        id: "poller",
-        slots: {
-          runPollingEffect: () => Effect.sleep("5 seconds"),
-        },
-      });
+      const actor = yield* Machine.spawn(machine, { id: "poller" });
       yield* actor.start;
 
       // Advance 3 seconds

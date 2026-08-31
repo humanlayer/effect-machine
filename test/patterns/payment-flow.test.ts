@@ -8,7 +8,6 @@ import {
   assertPath,
   Event,
   Machine,
-  Slot,
   State,
 } from "../../src/index.js";
 import { describe, expect, it, yieldFibers } from "effect-bun-test";
@@ -50,16 +49,9 @@ describe("Payment Flow Pattern", () => {
   });
   type PaymentEvent = typeof PaymentEvent.Type;
 
-  const PaymentSlots = Slot.define({
-    canRetry: Slot.fn({}, Schema.Boolean),
-    scheduleBridgeTimeout: Slot.fn({}),
-    scheduleAutoDismiss: Slot.fn({}),
-  });
-
   const paymentMachine = Machine.make({
     state: PaymentState,
     event: PaymentEvent,
-    slots: PaymentSlots,
     initial: PaymentState.Idle,
   })
     .on(PaymentState.Idle, PaymentEvent.StartCheckout, ({ event }) =>
@@ -100,17 +92,14 @@ describe("Payment Flow Pattern", () => {
       }),
     )
     // Error handling - retry with guard
-    .on(PaymentState.PaymentError, PaymentEvent.Retry, ({ state, slots }) =>
-      Effect.gen(function* () {
-        if (yield* slots.canRetry()) {
-          return PaymentState.ProcessingPayment({
+    .on(PaymentState.PaymentError, PaymentEvent.Retry, ({ state }) =>
+      state.canRetry && state.attempts < 3
+        ? PaymentState.ProcessingPayment({
             method: "card",
             amount: state.amount,
             attempts: state.attempts + 1,
-          });
-        }
-        return state;
-      }),
+          })
+        : state,
     )
     // Auto-dismiss goes back to idle (only for non-retryable errors)
     .on(PaymentState.PaymentError, PaymentEvent.AutoDismissError, ({ state }) => {
@@ -121,12 +110,12 @@ describe("Payment Flow Pattern", () => {
       return state; // Stay in error state
     })
     // Timeout tasks
-    .task(PaymentState.AwaitingBridgeConfirm, ({ slots }) => slots.scheduleBridgeTimeout(), {
+    .task(PaymentState.AwaitingBridgeConfirm, () => Effect.sleep("30 seconds"), {
       onSuccess: () => PaymentEvent.BridgeTimeout,
     })
     // Delay timer only fires for non-retryable errors
     // This works because the timer still fires, but the transition handler can check state
-    .task(PaymentState.PaymentError, ({ slots }) => slots.scheduleAutoDismiss(), {
+    .task(PaymentState.PaymentError, () => Effect.sleep("5 seconds"), {
       onSuccess: () => PaymentEvent.AutoDismissError,
     })
     // Cancel from multiple states
@@ -141,18 +130,6 @@ describe("Payment Flow Pattern", () => {
     .final(PaymentState.PaymentSuccess)
     .final(PaymentState.PaymentCancelled);
 
-  const paymentSlots = {
-    canRetry: () =>
-      Effect.gen(function* () {
-        const ctx = yield* paymentMachine.Context;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const s = ctx.state as any;
-        return s.canRetry === true && s.attempts < 3;
-      }),
-    scheduleBridgeTimeout: () => Effect.sleep("30 seconds"),
-    scheduleAutoDismiss: () => Effect.sleep("5 seconds"),
-  };
-
   it.live("card payment happy path", () =>
     assertPath(
       paymentMachine,
@@ -162,7 +139,6 @@ describe("Payment Flow Pattern", () => {
         PaymentEvent.PaymentSucceeded({ receiptId: "rcpt-123" }),
       ],
       ["Idle", "SelectingMethod", "ProcessingPayment", "PaymentSuccess"],
-      { slots: paymentSlots },
     ),
   );
 
@@ -175,7 +151,6 @@ describe("Payment Flow Pattern", () => {
         PaymentEvent.BridgeConfirmed({ transactionId: "tx-456" }),
       ],
       ["Idle", "SelectingMethod", "AwaitingBridgeConfirm", "PaymentSuccess"],
-      { slots: paymentSlots },
     ),
   );
 
@@ -197,16 +172,12 @@ describe("Payment Flow Pattern", () => {
         "ProcessingPayment",
         "PaymentSuccess",
       ],
-      { slots: paymentSlots },
     ),
   );
 
   it.scopedLive("retry blocked after max attempts", () =>
     Effect.gen(function* () {
-      const actor = yield* Machine.spawn(paymentMachine, {
-        id: "payment",
-        slots: paymentSlots,
-      });
+      const actor = yield* Machine.spawn(paymentMachine, { id: "payment" });
       yield* actor.start;
 
       yield* actor.send(PaymentEvent.StartCheckout({ amount: 50 }));
@@ -242,7 +213,6 @@ describe("Payment Flow Pattern", () => {
         PaymentEvent.Cancel,
       ],
       ["Idle", "SelectingMethod", "ProcessingPayment", "PaymentCancelled"],
-      { slots: paymentSlots },
     ),
   );
 
@@ -251,16 +221,12 @@ describe("Payment Flow Pattern", () => {
       paymentMachine,
       [PaymentEvent.StartCheckout({ amount: 100 }), PaymentEvent.Cancel],
       "PaymentSuccess",
-      { slots: paymentSlots },
     ),
   );
 
   it.scoped("bridge timeout triggers error", () =>
     Effect.gen(function* () {
-      const actor = yield* Machine.spawn(paymentMachine, {
-        id: "payment",
-        slots: paymentSlots,
-      });
+      const actor = yield* Machine.spawn(paymentMachine, { id: "payment" });
       yield* actor.start;
 
       yield* actor.send(PaymentEvent.StartCheckout({ amount: 100 }));
@@ -281,10 +247,7 @@ describe("Payment Flow Pattern", () => {
 
   it.scoped("non-retryable error auto-dismisses", () =>
     Effect.gen(function* () {
-      const actor = yield* Machine.spawn(paymentMachine, {
-        id: "payment",
-        slots: paymentSlots,
-      });
+      const actor = yield* Machine.spawn(paymentMachine, { id: "payment" });
       yield* actor.start;
 
       yield* actor.send(PaymentEvent.StartCheckout({ amount: 100 }));

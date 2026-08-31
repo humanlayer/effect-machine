@@ -74,7 +74,7 @@ export interface PersistenceAdapterService {
   /** Load the latest snapshot, or None if no snapshot exists. */
   readonly loadSnapshot: (
     key: PersistenceKey,
-  ) => Effect.Effect<Option.Option<Snapshot<unknown>>, PersistenceError>;
+  ) => Effect.Effect<Option.Option<unknown>, PersistenceError>;
 
   /** Append events to the journal. Fails with VersionConflictError if expectedVersion doesn't match. */
   readonly appendEvents: (
@@ -87,7 +87,7 @@ export interface PersistenceAdapterService {
   readonly loadEvents: (
     key: PersistenceKey,
     afterVersion?: number,
-  ) => Effect.Effect<ReadonlyArray<PersistedEvent<unknown>>, PersistenceError>;
+  ) => Effect.Effect<ReadonlyArray<unknown>, PersistenceError>;
 }
 
 // ============================================================================

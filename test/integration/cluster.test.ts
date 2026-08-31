@@ -22,7 +22,6 @@ import {
   simulate,
   State,
   Event,
-  Slot,
 } from "../../src/index.js";
 import { toEntity, EntityMachine, makeEntityActorRef } from "../../src/cluster/index.js";
 
@@ -238,23 +237,13 @@ describe("Entity.makeTestClient with machine handler", () => {
   });
   type CounterEvent = typeof CounterEvent.Type;
 
-  const CounterSlots = Slot.define({
-    underLimit: Slot.fn({}, Schema.Boolean),
-  });
-
   const counterMachine = Machine.make({
     state: CounterState,
     event: CounterEvent,
-    slots: CounterSlots,
     initial: CounterState.Counting({ count: 0 }),
   })
-    .on(CounterState.Counting, CounterEvent.Increment, ({ state, slots }) =>
-      Effect.gen(function* () {
-        if (yield* slots.underLimit()) {
-          return CounterState.Counting({ count: state.count + 1 });
-        }
-        return state;
-      }),
+    .on(CounterState.Counting, CounterEvent.Increment, ({ state }) =>
+      state.count < 3 ? CounterState.Counting({ count: state.count + 1 }) : state,
     )
     .on(CounterState.Counting, CounterEvent.Finish, ({ state }) =>
       CounterState.Done({ count: state.count }),
@@ -322,27 +311,13 @@ describe("Entity.makeTestClient with machine handler", () => {
   test("guards work with simulate", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
-        const result = yield* simulate(
-          counterMachine,
-          [
-            CounterEvent.Increment,
-            CounterEvent.Increment,
-            CounterEvent.Increment,
-            CounterEvent.Increment, // blocked by guard
-            CounterEvent.Finish,
-          ],
-          {
-            slots: {
-              underLimit: () =>
-                Effect.gen(function* () {
-                  const ctx = yield* counterMachine.Context;
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const state = ctx.state as any;
-                  return state._tag === "Counting" && state.count < 3;
-                }),
-            },
-          },
-        );
+        const result = yield* simulate(counterMachine, [
+          CounterEvent.Increment,
+          CounterEvent.Increment,
+          CounterEvent.Increment,
+          CounterEvent.Increment, // blocked by guard
+          CounterEvent.Finish,
+        ]);
 
         expect(result.finalState._tag).toBe("Done");
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test assertion
@@ -444,6 +419,42 @@ describe("EntityMachine.layer", () => {
         if (exit._tag === "Failure") {
           expect(Schema.isSchemaError(exit.failure)).toBe(true);
         }
+      }).pipe(Effect.scoped, Effect.provide(TestShardingConfig)) as Effect.Effect<void>,
+    );
+  });
+
+  test("deferred transforming ask decodes once via EntityMachine.layer", async () => {
+    const AskState = State({
+      Idle: {},
+      Replying: {},
+    });
+    const AskEvent = Event({
+      GetCount: Event.reply({}, Schema.NumberFromString),
+    });
+    const askMachine = Machine.make({
+      state: AskState,
+      event: AskEvent,
+      initial: AskState.Idle,
+    })
+      .on(AskState.Idle, AskEvent.GetCount, () => Machine.deferReply(AskState.Replying))
+      .spawn(AskState.Replying, ({ self }) =>
+        Effect.sleep("10 millis").pipe(Effect.andThen(self.reply(42)), Effect.asVoid),
+      );
+    const entity = toEntity(askMachine, { type: "DeferredTransformAsk" });
+    const entityLayer = EntityMachine.layer(entity, {
+      initializeState: () => AskState.Idle,
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const makeClient = yield* Entity.makeTestClient(
+          entity,
+          entityLayer.pipe(Layer.provide(ActorSystemDefault)),
+        );
+        const client = yield* makeClient("deferred-ask-1");
+        const ref = makeEntityActorRef(entity, client, "deferred-ask-1");
+        const reply: number = yield* ref.ask(AskEvent.GetCount).pipe(Effect.timeout("2 seconds"));
+        expect(reply).toBe(42);
       }).pipe(Effect.scoped, Effect.provide(TestShardingConfig)) as Effect.Effect<void>,
     );
   });

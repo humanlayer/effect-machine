@@ -121,14 +121,6 @@
                 "strictEffectProvide": "off"
               }
             }
-          },
-          {
-            "include": ["src/slot.ts"],
-            "options": {
-              "diagnosticSeverity": {
-                "anyUnknownInErrorContext": "off"
-              }
-            }
           }
         ]
       }

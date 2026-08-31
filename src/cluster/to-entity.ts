@@ -62,7 +62,7 @@ export interface MachineEntity<
   EntityType extends string,
 > extends Entity.Entity<EntityType, EntityRpcs<Schema.Codec<State>, Schema.Codec<Event>>[number]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- schema-definition parameters are carried opaquely by MachineEntity
-  readonly machine: Machine<State, Event, R, any, any, any>;
+  readonly machine: Machine<State, Event, R, any, any>;
   readonly stateSchema: Schema.Codec<State>;
   readonly eventSchema: Schema.Codec<Event>;
   readonly rpcs: EntityRpcs<Schema.Codec<State>, Schema.Codec<Event>>;
@@ -106,7 +106,7 @@ export const toEntity = <
   const EntityType extends string,
 >(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Schema fields need wide acceptance
-  machine: Machine<S, E, R, any, any, any>,
+  machine: Machine<S, E, R, any, any>,
   options: ToEntityOptions<EntityType>,
 ): MachineEntity<S, E, R, EntityType> => {
   const stateSchema = machine.stateSchema;

@@ -125,28 +125,11 @@ export const INTERNAL_ENTER_EVENT = "$enter" as const;
 /**
  * Extract _tag from a tagged value or constructor.
  *
- * Supports:
- * - Plain values with `_tag` (MachineSchema empty structs)
- * - Constructors with static `_tag` (MachineSchema non-empty structs)
- * - Data.taggedEnum constructors (fallback via instantiation)
+ * Supports plain tagged values and constructors with an explicit static `_tag`.
+ * Legacy constructors without a static tag must be wrapped with `Machine.tagged`.
  */
-export const getTag = (
-  constructorOrValue: { _tag: string } | ((...args: never[]) => { _tag: string }),
-): string => {
-  // Direct _tag property (values or static on constructors)
-  if ("_tag" in constructorOrValue) {
-    return constructorOrValue._tag;
-  }
-  // Fallback: instantiate (Data.taggedEnum compatibility)
-  // Try zero-arg first, then empty object for record constructors
-  try {
-    // The _tag check leaves only the callable constructor branch.
-    return constructorOrValue()._tag;
-  } catch {
-    // SAFETY: Data tagged record constructors accept an empty record when zero-argument invocation fails.
-    return (constructorOrValue as (args: Record<string, never>) => { _tag: string })({})._tag;
-  }
-};
+export const getTag = (constructorOrValue: { readonly _tag: string }): string =>
+  constructorOrValue._tag;
 
 /** Check if a value is an Effect */
 export const isEffect: (value: unknown) => value is Effect.Effect<unknown, unknown, unknown> =

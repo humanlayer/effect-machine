@@ -19,6 +19,7 @@ import {
   Queue,
   Ref,
   Schedule,
+  Schema,
   Scope,
   Semaphore,
   Context,
@@ -27,17 +28,14 @@ import {
 } from "effect";
 
 import type { Machine, Lifecycle, LifecycleEvent } from "./machine.js";
-import { materializeMachine } from "./machine.js";
 import { ActorExit, type Supervision } from "./supervision.js";
 import type { ReplyTypeBrand, ExtractReply } from "./internal/brands.js";
-import type { SlotsDef, ProvideSlots } from "./slot.js";
 import type { InspectorService } from "./inspection.js";
 import { Inspector as InspectorTag } from "./inspection.js";
 import { resolveTransition } from "./internal/transition.js";
 import type { ProcessEventHooks, ProcessEventResult } from "./internal/transition.js";
 import { emitWithTimestamp } from "./internal/inspection.js";
-import type { NoReplyError } from "./errors.js";
-import { DuplicateActorError, ActorStoppedError } from "./errors.js";
+import { DuplicateActorError, ActorStoppedError, NoReplyError } from "./errors.js";
 import {
   createRuntime,
   type RuntimeLifecycleHooks,
@@ -57,8 +55,8 @@ export type {
 // QueuedEvent — re-export from runtime kernel
 // ============================================================================
 
-/** Discriminated mailbox request — alias for RuntimeQueuedEvent */
-export type QueuedEvent<E> = RuntimeQueuedEvent<E>;
+/** Discriminated mailbox request used by a local actor cell. */
+export type QueuedEvent<S, E> = RuntimeQueuedEvent<S, E, ActorStoppedError>;
 
 // ============================================================================
 // ActorRef Interface
@@ -231,9 +229,6 @@ interface MutableCell<T> {
   current: T;
 }
 
-// eslint-disable-next-line typescript/no-explicit-any, anti-slop/no-unsafe-dictionary-type -- deprecated slots erase handlers here
-type LegacySlotHandlers = Record<string, any>;
-
 interface PendingReply {
   readonly failStopped: (error: ActorStoppedError) => Effect.Effect<void>;
 }
@@ -292,19 +287,12 @@ export interface ActorSystemService {
    * const actor = yield* system.spawn("my-actor", machine);
    * ```
    */
-  readonly spawn: <
-    S extends { readonly _tag: string },
-    E extends { readonly _tag: string },
-    R,
-    SD extends SlotsDef = Record<string, never>,
-  >(
+  readonly spawn: <S extends { readonly _tag: string }, E extends { readonly _tag: string }, R>(
     id: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    machine: Machine<S, E, R, any, any, SD>,
+    machine: Machine<S, E, R, any, any>,
     options?: {
       readonly supervision?: Supervision.Policy;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      readonly slots?: ProvideSlots<SD, any>;
       readonly lifecycle?: Lifecycle<S, E>;
     },
   ) => Effect.Effect<ActorRef<S, E>, DuplicateActorError, R>;
@@ -385,13 +373,12 @@ export const buildActorRefCore = <
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
-  SD extends SlotsDef,
 >(
   id: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Schema fields need wide acceptance
-  machine: Machine<S, E, R, any, any, SD>,
+  machine: Machine<S, E, R, any, any>,
   stateRef: SubscriptionRef.SubscriptionRef<S>,
-  eventQueueRef: Ref.Ref<Queue.Queue<QueuedEvent<E>>>,
+  eventQueueRef: Ref.Ref<Queue.Queue<QueuedEvent<S, E>>>,
   stoppedRef: Ref.Ref<boolean>,
   listeners: Listeners<S>,
   stop: Effect.Effect<void>,
@@ -430,22 +417,14 @@ export const buildActorRefCore = <
         isFinal: machine.finalStates.has(currentState._tag),
       } satisfies ProcessEventResult<S>;
     }
-    const reply = yield* Deferred.make<
-      ProcessEventResult<{ readonly _tag: string }>,
-      ActorStoppedError
-    >();
+    const reply = yield* Deferred.make<ProcessEventResult<S>, ActorStoppedError>();
     const pending = pendingReply(reply);
-    // SAFETY: the runtime queue reports ActorStoppedError through its wider unknown error channel.
-    const queuedReply = reply as Deferred.Deferred<
-      ProcessEventResult<{ readonly _tag: string }>,
-      unknown
-    >;
     pendingReplies.add(pending);
     const q = yield* Ref.get(eventQueueRef);
     yield* Queue.offer(q, {
       _tag: "call",
       event,
-      reply: queuedReply,
+      reply,
     });
     const result = yield* Deferred.await(reply).pipe(
       Effect.ensuring(Effect.sync(() => pendingReplies.delete(pending))),
@@ -468,30 +447,32 @@ export const buildActorRefCore = <
         ),
       ),
     );
-    // SAFETY: this ActorRef and its queue share the same state type S.
-    return result as ProcessEventResult<S>;
+    return result;
   });
 
-  const ask = Effect.fn("effect-machine.actor.ask")(function* (event: E) {
-    const stopped = yield* Ref.get(stoppedRef);
-    if (stopped) {
-      return yield* new ActorStoppedError({ actorId: id });
-    }
-    const reply = yield* Deferred.make<unknown, NoReplyError | ActorStoppedError>();
-    const pending = pendingReply(reply);
-    // SAFETY: queue processing emits NoReplyError; ActorStoppedError is managed by pending reply cleanup.
-    const queuedReply = reply as Deferred.Deferred<unknown, NoReplyError>;
-    pendingReplies.add(pending);
-    const q = yield* Ref.get(eventQueueRef);
-    yield* Queue.offer(q, {
-      _tag: "ask",
-      event,
-      reply: queuedReply,
-    });
-    return yield* Deferred.await(reply).pipe(
-      Effect.ensuring(Effect.sync(() => pendingReplies.delete(pending))),
-    );
-  });
+  const ask = <ReplyEvent extends E & ReplyTypeBrand<unknown>>(event: ReplyEvent) =>
+    Effect.gen(function* () {
+      const registeredSchema = machine.replySchemas.get(event._tag);
+      if (registeredSchema === undefined) {
+        return yield* new NoReplyError({ actorId: id, eventTag: event._tag });
+      }
+
+      const stopped = yield* Ref.get(stoppedRef);
+      if (stopped) {
+        return yield* new ActorStoppedError({ actorId: id });
+      }
+
+      const reply = yield* Deferred.make<unknown, NoReplyError | ActorStoppedError>();
+      const pending = pendingReply(reply);
+      pendingReplies.add(pending);
+      const q = yield* Ref.get(eventQueueRef);
+      yield* Queue.offer(q, { _tag: "ask", event, reply });
+      const input: unknown = yield* Deferred.await(reply).pipe(
+        Effect.ensuring(Effect.sync(() => pendingReplies.delete(pending))),
+      );
+      const decoder = Schema.make<Schema.Decoder<ExtractReply<ReplyEvent>>>(registeredSchema.ast);
+      return yield* Schema.decodeUnknownEffect(decoder)(input).pipe(Effect.orDie);
+    }).pipe(Effect.withSpan("effect-machine.actor.ask"));
 
   const snapshot = SubscriptionRef.get(stateRef).pipe(
     Effect.withSpan("effect-machine.actor.snapshot"),
@@ -565,8 +546,7 @@ export const buildActorRefCore = <
     send,
     cast: send,
     call,
-    // SAFETY: the public ask signature narrows events using the reply brand carried by E.
-    ask: ask as ActorRef<S, E>["ask"],
+    ask,
     state: stateRef,
     stop,
     start,
@@ -685,17 +665,17 @@ const runSupervisionLoop = <
 >(params: {
   supervision: Supervision.Policy;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  machine: Machine<S, E, any, any, any, any>;
+  machine: Machine<S, E, any, any, any>;
   id: string;
-  runtimeRef: { current: RuntimeHandle<S, E> | undefined };
+  runtimeRef: { current: RuntimeHandle<S, E, ActorStoppedError> | undefined };
   terminalExitDeferred: Deferred.Deferred<ActorExit<S>>;
   pendingReplies: Set<PendingReply>;
-  eventQueueRef: Ref.Ref<Queue.Queue<QueuedEvent<E>>>;
+  eventQueueRef: Ref.Ref<Queue.Queue<QueuedEvent<S, E>>>;
   stateRef: SubscriptionRef.SubscriptionRef<S>;
   stoppedRef: Ref.Ref<boolean>;
   childrenMap: Map<string, ActorHandle>;
   listeners: Listeners<S>;
-  spawnGeneration: (initialState: S) => Effect.Effect<RuntimeHandle<S, E>>;
+  spawnGeneration: (initialState: S) => Effect.Effect<RuntimeHandle<S, E, ActorStoppedError>>;
   lifecycle?: Lifecycle<S, E>;
   generationRef: { get: () => number; set: (g: number) => void };
   onRestart?: (generation: number, exit: ActorExit<unknown>) => Effect.Effect<void>;
@@ -703,7 +683,6 @@ const runSupervisionLoop = <
   Effect.gen(function* () {
     const step = yield* Schedule.toStepWithSleep(params.supervision.schedule);
 
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const currentRuntime = params.runtimeRef.current;
       if (currentRuntime === undefined) return;
@@ -750,7 +729,7 @@ const runSupervisionLoop = <
       }
 
       yield* settlePendingReplies(params.pendingReplies, params.id);
-      const freshQueue = yield* Queue.unbounded<QueuedEvent<E>>();
+      const freshQueue = yield* Queue.unbounded<QueuedEvent<S, E>>();
       yield* Ref.set(params.eventQueueRef, freshQueue);
       yield* SubscriptionRef.set(params.stateRef, restartState);
       yield* Ref.set(params.stoppedRef, false);
@@ -776,11 +755,10 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
-  SD extends SlotsDef,
 >(
   id: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  machine: Machine<S, E, R, any, any, SD>,
+  machine: Machine<S, E, R, any, any>,
   options?: {
     initialState?: S;
     supervision?: Supervision.Policy;
@@ -818,7 +796,7 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
   // Cell-owned resources: stable across generations (supervision)
   const stateRef = yield* SubscriptionRef.make<S>(initial);
   const stoppedRef = yield* Ref.make(false);
-  const initialQueue = yield* Queue.unbounded<QueuedEvent<E>>();
+  const initialQueue = yield* Queue.unbounded<QueuedEvent<S, E>>();
   const eventQueueRef = yield* Ref.make(initialQueue);
 
   // Terminal exit deferred — set exactly once when the actor truly terminates.
@@ -832,7 +810,9 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
   let generation = 0;
 
   // Mutable ref for the current runtime — supervision loop updates this
-  const runtimeRef: MutableCell<RuntimeHandle<S, E> | undefined> = { current: undefined };
+  const runtimeRef: MutableCell<RuntimeHandle<S, E, ActorStoppedError> | undefined> = {
+    current: undefined,
+  };
 
   // Mutable ref for supervisor fiber — set during start, used by stop
   const supervisorFiberRef: MutableCell<Fiber.Fiber<void> | undefined> = {
@@ -933,53 +913,50 @@ export const createActor = Effect.fn("effect-machine.actor.spawn")(function* <
   /** Create a single runtime generation with an explicit hydrated/recovered state. */
   const spawnGeneration = (generationInitial: S) =>
     Ref.get(eventQueueRef).pipe(
-      Effect.flatMap(
-        (currentQueue) =>
-          // SAFETY: createRuntime is instantiated from this actor's exact machine, state, and event types.
-          createRuntime(machine, system, {
-            actorId: id,
-            initialState: generationInitial,
-            hooks,
-            skipFinalizer: true,
-            cellResources: { stateRef, stoppedRef, eventQueue: currentQueue },
-            lifecycle: buildRuntimeLifecycle(),
-            wrapProcess: (state, event, inner) =>
-              Effect.withSpan("effect-machine.event.process", {
-                attributes: {
-                  "effect_machine.actor.id": id,
-                  "effect_machine.state.current": state._tag,
-                  "effect_machine.event.type": event._tag,
-                },
-              })(
-                inner.pipe(
-                  Effect.tap((r) =>
-                    Effect.annotateCurrentSpan(
-                      "effect_machine.transition.matched",
-                      r.result.transitioned,
-                    ),
+      Effect.flatMap((currentQueue) =>
+        createRuntime(machine, system, {
+          actorId: id,
+          initialState: generationInitial,
+          hooks,
+          cellResources: { stateRef, stoppedRef, eventQueue: currentQueue },
+          lifecycle: buildRuntimeLifecycle(),
+          wrapProcess: (state, event, inner) =>
+            Effect.withSpan("effect-machine.event.process", {
+              attributes: {
+                "effect_machine.actor.id": id,
+                "effect_machine.state.current": state._tag,
+                "effect_machine.event.type": event._tag,
+              },
+            })(
+              inner.pipe(
+                Effect.tap((r) =>
+                  Effect.annotateCurrentSpan(
+                    "effect_machine.transition.matched",
+                    r.result.transitioned,
                   ),
                 ),
               ),
-            onChildSpawned: <ChildState extends { readonly _tag: string }, ChildEvent>(
-              childId: string,
-              child: ActorRef<ChildState, ChildEvent>,
-            ) =>
-              Effect.gen(function* () {
-                childrenMap.set(childId, child);
-                // Use Scope.Scope here intentionally — this is the spawn handler's
-                // state-scoped scope, not an ambient scope. When the state exits,
-                // this scope closes and the child is removed from the map.
-                const maybeScope = yield* Effect.serviceOption(Scope.Scope);
-                if (Option.isSome(maybeScope)) {
-                  yield* Scope.addFinalizer(
-                    maybeScope.value,
-                    Effect.sync(() => {
-                      childrenMap.delete(childId);
-                    }),
-                  );
-                }
-              }),
-          }) as Effect.Effect<RuntimeHandle<S, E>>,
+            ),
+          onChildSpawned: <ChildState extends { readonly _tag: string }, ChildEvent>(
+            childId: string,
+            child: ActorRef<ChildState, ChildEvent>,
+          ) =>
+            Effect.gen(function* () {
+              childrenMap.set(childId, child);
+              // Use Scope.Scope here intentionally — this is the spawn handler's
+              // state-scoped scope, not an ambient scope. When the state exits,
+              // this scope closes and the child is removed from the map.
+              const maybeScope = yield* Effect.serviceOption(Scope.Scope);
+              if (Option.isSome(maybeScope)) {
+                yield* Scope.addFinalizer(
+                  maybeScope.value,
+                  Effect.sync(() => {
+                    childrenMap.delete(childId);
+                  }),
+                );
+              }
+            }),
+        }).pipe(Effect.setContext(serviceContext)),
       ),
     );
 
@@ -1213,23 +1190,18 @@ const make = Effect.fn("effect-machine.actorSystem.make")(function* () {
   >(
     id: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    machine: Machine<S, E, R, any, any, any>,
+    machine: Machine<S, E, R, any, any>,
     spawnOptions?: {
       readonly supervision?: Supervision.Policy;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      readonly slots?: LegacySlotHandlers;
       readonly lifecycle?: Lifecycle<S, E>;
     },
   ) {
     if (MutableHashMap.has(actorsMap, id)) {
       return yield* new DuplicateActorError({ actorId: id });
     }
-    // Materialize slots if provided
-    const materialized =
-      spawnOptions?.slots !== undefined ? materializeMachine(machine, spawnOptions.slots) : machine;
     // Mutable ref for the actor �� onRestart closure needs it, but actor isn't registered yet
     let actorRef: ActorHandle | undefined;
-    const actor = yield* createActor(id, materialized, {
+    const actor = yield* createActor(id, machine, {
       supervision: spawnOptions?.supervision,
       lifecycle: spawnOptions?.lifecycle,
       onRestart:
@@ -1256,19 +1228,12 @@ const make = Effect.fn("effect-machine.actorSystem.make")(function* () {
     return actor;
   });
 
-  const spawn = <
-    S extends { readonly _tag: string },
-    E extends { readonly _tag: string },
-    R,
-    SD extends SlotsDef = Record<string, never>,
-  >(
+  const spawn = <S extends { readonly _tag: string }, E extends { readonly _tag: string }, R>(
     id: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    machine: Machine<S, E, R, any, any, SD>,
+    machine: Machine<S, E, R, any, any>,
     options?: {
       readonly supervision?: Supervision.Policy;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      readonly slots?: ProvideSlots<SD, any>;
       readonly lifecycle?: Lifecycle<S, E>;
     },
   ): Effect.Effect<ActorRef<S, E>, DuplicateActorError, R> =>

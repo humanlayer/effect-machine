@@ -91,6 +91,15 @@ A few things to notice:
 - `.onAny(...)` is a fallback; a specific `.on(...)` wins.
 - `.task(...)` runs work on state entry, sends mapped completion events, and cancels work on state exit.
 
+Generated state and event constructors carry a static `_tag`, so `State.Active(...)` and
+`Event.Start(...)` remain directly usable in builder methods. If an older constructor returns a
+compatible tagged value but does not expose a static tag, adapt it explicitly instead of invoking
+it during registration:
+
+```ts
+const LegacyActive = Machine.tagged("Active", legacyActiveConstructor);
+```
+
 ## Transitions And Effects
 
 The fluent builder keeps state behavior beside the transitions that make it relevant:
@@ -117,7 +126,7 @@ State-effect contexts expose an honest lifecycle event union: initial effects re
 
 ## Services And Layers
 
-New machines use Effect's service system for dependencies, not actor-local slot maps. Define a dependency with `Context.Service` (the Effect v4 replacement for `ServiceMap.Service`), access it with `yield*` inside a state effect, and provide an implementation with a `Layer` at the program boundary.
+Machines use Effect's service system for dependencies. Define a dependency with `Context.Service` (the Effect v4 replacement for `ServiceMap.Service`), access it with `yield*` inside a state effect, and provide an implementation with a `Layer` at the program boundary.
 
 Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine and flow through `Machine.spawn`, `system.spawn`, and `EntityMachine.layer`. Transition handlers remain pure: they cannot require services or fail. Move I/O into a state effect and communicate its outcome with an event.
 
@@ -135,19 +144,6 @@ const program = Effect.gen(function* () {
 ```
 
 This also makes testing conventional Effect code: provide a test layer around the actor program. `simulate` and `createTestHarness` do not run state effects, so they do not require their services.
-
-### Migrating From Slots
-
-`Slot`, `Machine.make({ slots })`, handler `({ slots })`, and `{ slots }` spawn options remain as deprecated compatibility APIs. Use them only while migrating an existing machine; they are not the DI mechanism for new code.
-
-| Legacy slot pattern                     | Effect service replacement                                               |
-| --------------------------------------- | ------------------------------------------------------------------------ |
-| `Slot.define({ charge: Slot.fn(...) })` | `class Payments extends Context.Service<...>()("@app/Payments") {}`      |
-| `Machine.make({ ..., slots })`          | Read the service in `.task(...)`, `.spawn(...)`, or `.background(...)`   |
-| `Machine.spawn(machine, { slots })`     | `Machine.spawn(machine).pipe(Effect.provide(PaymentsLive))`              |
-| `system.spawn(id, machine, { slots })`  | Provide `PaymentsLive` around the program that calls `system.spawn(...)` |
-
-Legacy slot handlers must still be supplied explicitly at every execution boundary that uses them, such as `Machine.spawn`, `system.spawn`, `simulate`, `createTestHarness`, and `Machine.replay`. Their dependencies are not inferred through the machine type, so migrate them to Effect services when possible.
 
 ## Request And Reply
 
@@ -330,6 +326,11 @@ Persistence is opt-in and resolves `PersistenceAdapter` from the entity layer's 
 
 - **Snapshot** is the default. It saves on each state change unless `snapshotSchedule` controls the cadence, then restores on reactivation.
 - **Journal** appends every `Send` and `Ask` event inline, replays events after the latest snapshot, and saves a snapshot when the entity deactivates.
+
+Adapter writes encode runtime state and events through the machine codecs, and load methods return
+unknown stored records. Entity activation decodes the complete snapshot or journal
+record—including payload, version, and timestamp—exactly once before hydration or replay;
+malformed storage data defects activation rather than entering the machine.
 
 Entity options also include `maxIdleTime`, `mailboxCapacity`, `defectRetryPolicy`, and `disableFatalDefects`, which are forwarded to `@effect/cluster`.
 
