@@ -8,6 +8,7 @@ import { Rpc } from "effect/unstable/rpc";
 import { Schema } from "effect";
 
 import type { Machine } from "../machine.js";
+import type { MachineSchemaDefinition } from "../schema.js";
 import { MissingSchemaError } from "../errors.js";
 
 /**
@@ -60,9 +61,13 @@ export interface MachineEntity<
   Event extends { readonly _tag: string },
   R,
   EntityType extends string,
+  StateDefinition extends Record<string, Schema.Struct.Fields> = Record<
+    string,
+    Schema.Struct.Fields
+  >,
+  EventDefinition extends MachineSchemaDefinition = MachineSchemaDefinition,
 > extends Entity.Entity<EntityType, EntityRpcs<Schema.Codec<State>, Schema.Codec<Event>>[number]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- schema-definition parameters are carried opaquely by MachineEntity
-  readonly machine: Machine<State, Event, R, any, any>;
+  readonly machine: Machine<State, Event, R, StateDefinition, EventDefinition>;
   readonly stateSchema: Schema.Codec<State>;
   readonly eventSchema: Schema.Codec<Event>;
   readonly rpcs: EntityRpcs<Schema.Codec<State>, Schema.Codec<Event>>;
@@ -104,11 +109,12 @@ export const toEntity = <
   E extends { readonly _tag: string },
   R,
   const EntityType extends string,
+  StateDefinition extends Record<string, Schema.Struct.Fields>,
+  EventDefinition extends MachineSchemaDefinition,
 >(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Schema fields need wide acceptance
-  machine: Machine<S, E, R, any, any>,
+  machine: Machine<S, E, R, StateDefinition, EventDefinition>,
   options: ToEntityOptions<EntityType>,
-): MachineEntity<S, E, R, EntityType> => {
+): MachineEntity<S, E, R, EntityType, StateDefinition, EventDefinition> => {
   const stateSchema = machine.stateSchema;
   const eventSchema = machine.eventSchema;
 

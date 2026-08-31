@@ -32,6 +32,14 @@ const clusterMachine = Machine.make({
   .background(() => ClusterService.pipe(Effect.andThen((service) => service.run)));
 
 const ClusterEntity = toEntity(clusterMachine, { type: "TypeConstraints" });
+
+const ForeignState = State({ Foreign: {} });
+const ForeignEvent = Event({ Foreign: {} });
+// @ts-expect-error - a machine-owned entity retains its machine's exact state/event definitions
+ClusterEntity.machine.on(ForeignState.Foreign, ForeignEvent.Foreign, () =>
+  ClusterState.Active({ count: 0 }),
+);
+
 const withoutPersistence = EntityMachine.layer(ClusterEntity);
 const withPersistence = EntityMachine.layer(ClusterEntity, {
   persistence: { strategy: "journal" },
