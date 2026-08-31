@@ -1,5 +1,11 @@
 # @humanlayer/effect-machine
 
+## 0.19.1
+
+### Patch Changes
+
+- [#5](https://github.com/humanlayer/effect-machine/pull/5) [`b16c942`](https://github.com/humanlayer/effect-machine/commit/b16c9424fa209dbed36fe935665d0a72e8408d3b) Thanks [@K-Mistele](https://github.com/K-Mistele)! - Preserve exact machine schema types on `MachineEntity` and require `.task()` shorthand to return a valid machine event without using `any` or diagnostic suppressions.
+
 ## 0.19.0
 
 ### Minor Changes
