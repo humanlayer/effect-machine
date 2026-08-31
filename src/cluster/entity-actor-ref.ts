@@ -15,6 +15,7 @@ import { Effect, Option, Schema, Stream } from "effect";
 
 import type { ExtractReply, ReplyTypeBrand } from "../internal/brands.js";
 import { ActorStoppedError, NoReplyError } from "../errors.js";
+import type { MachineSchemaDefinition } from "../schema.js";
 import type { EntityRpcs, MachineEntity } from "./to-entity.js";
 
 /**
@@ -75,8 +76,10 @@ export const makeEntityActorRef = <
   R,
   EntityType extends string,
   ClientError,
+  StateDefinition extends Record<string, Schema.Struct.Fields>,
+  EventDefinition extends MachineSchemaDefinition,
 >(
-  entity: MachineEntity<State, Event, R, EntityType>,
+  entity: MachineEntity<State, Event, R, EntityType, StateDefinition, EventDefinition>,
   client: RpcClient.RpcClient<
     EntityRpcs<Schema.Codec<State>, Schema.Codec<Event>>[number],
     ClientError

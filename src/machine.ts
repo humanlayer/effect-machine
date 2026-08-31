@@ -34,8 +34,8 @@
  *
  * @module
  */
-import type { Duration, Schema } from "effect";
-import { Cause, Effect, Exit, Option, Random, Scope } from "effect";
+import type { Duration } from "effect";
+import { Cause, Effect, Exit, Option, Random, Schema, Scope } from "effect";
 
 import type { DeferReplyResult, ReplyResult, TransitionResult } from "./internal/utils.js";
 import { getTag, makeReply, makeDeferReply } from "./internal/utils.js";
@@ -178,11 +178,17 @@ export interface BackgroundEffect<State, Event, R> {
 // Options types
 // ============================================================================
 
-export interface TaskOptions<State, Event, A, E1, ES, EF> {
-  readonly onSuccess?: (value: A, ctx: StateHandlerContext<State, Event>) => ES;
+interface TaskCommonOptions<State, Event, E1, EF> {
   readonly onFailure?: (cause: Cause.Cause<E1>, ctx: StateHandlerContext<State, Event>) => EF;
   readonly name?: string;
 }
+
+/** Options for a mapped task, or for shorthand when the task already returns an event. */
+export type TaskOptions<State, Event, A, E1, ES, EF> = TaskCommonOptions<State, Event, E1, EF> &
+  (
+    | { readonly onSuccess: (value: A, ctx: StateHandlerContext<State, Event>) => ES }
+    | ([A] extends [Event] ? { readonly onSuccess?: undefined } : never)
+  );
 
 // ============================================================================
 // Recovery / Durability
@@ -633,14 +639,12 @@ export class Machine<
     A,
     E1,
     R1,
-    ES extends VariantsUnion<_ED> & BrandedEvent,
-    EF extends VariantsUnion<_ED> & BrandedEvent,
+    ES extends Event & VariantsUnion<_ED> & BrandedEvent,
+    EF extends Event & VariantsUnion<_ED> & BrandedEvent,
   >(
     state: TaggedOrConstructor<NS>,
-    run: (
-      ctx: StateHandlerContext<NS, VariantsUnion<_ED> & BrandedEvent>,
-    ) => Effect.Effect<A, E1, Scope.Scope | R1>,
-    options: TaskOptions<NS, VariantsUnion<_ED> & BrandedEvent, A, E1, ES, EF>,
+    run: (ctx: StateHandlerContext<NS, Event>) => Effect.Effect<A, E1, Scope.Scope | R1>,
+    options: TaskOptions<NS, Event, A, E1, ES, EF>,
   ): Machine<State, Event, R | R1, _SD, _ED>;
   /** Multiple states — handler receives the selected state union. */
   task<
@@ -648,35 +652,38 @@ export class Machine<
     A,
     E1,
     R1,
-    ES extends VariantsUnion<_ED> & BrandedEvent,
-    EF extends VariantsUnion<_ED> & BrandedEvent,
+    ES extends Event & VariantsUnion<_ED> & BrandedEvent,
+    EF extends Event & VariantsUnion<_ED> & BrandedEvent,
   >(
     states: NS,
     run: (
-      ctx: StateHandlerContext<
-        NS[number] extends TaggedOrConstructor<infer S> ? S : never,
-        VariantsUnion<_ED> & BrandedEvent
-      >,
+      ctx: StateHandlerContext<NS[number] extends TaggedOrConstructor<infer S> ? S : never, Event>,
     ) => Effect.Effect<A, E1, Scope.Scope | R1>,
     options: TaskOptions<
       NS[number] extends TaggedOrConstructor<infer S> ? S : never,
-      VariantsUnion<_ED> & BrandedEvent,
+      Event,
       A,
       E1,
       ES,
       EF
     >,
   ): Machine<State, Event, R | R1, _SD, _ED>;
-  /* eslint-disable @typescript-eslint/no-explicit-any -- public overloads preserve selection/task correlation at this implementation boundary */
-  task(
-    stateOrStates: any,
-    run: (ctx: StateHandlerContext<any, any>) => Effect.Effect<any, any, any>,
-    options: any,
-  ): Machine<State, Event, R, _SD, _ED> {
-    const handler: StateEffectHandler<any, any, any> = Effect.fn("effect-machine.task")(function* (
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- implementation is checked by public overloads
-      ctx: StateHandlerContext<any, any>,
-    ) {
+  task<
+    NS extends VariantsUnion<_SD> & BrandedState,
+    A,
+    E1,
+    R1,
+    ES extends Event & VariantsUnion<_ED> & BrandedEvent,
+    EF extends Event & VariantsUnion<_ED> & BrandedEvent,
+  >(
+    stateOrStates: TaggedOrConstructor<NS> | ReadonlyArray<TaggedOrConstructor<NS>>,
+    run: (ctx: StateHandlerContext<NS, Event>) => Effect.Effect<A, E1, Scope.Scope | R1>,
+    options: TaskOptions<NS, Event, A, E1, ES, EF>,
+  ): Machine<State, Event, R | R1, _SD, _ED> {
+    const isEvent = this.eventSchema !== undefined ? Schema.is(this.eventSchema) : undefined;
+    const handler: StateEffectHandler<NS, Event, Scope.Scope | R1> = Effect.fn(
+      "effect-machine.task",
+    )(function* (ctx: StateHandlerContext<NS, Event>) {
       yield* emitTaskInspection({
         actorId: ctx.actorId,
         state: ctx.state,
@@ -684,7 +691,6 @@ export class Machine<
         phase: "start",
       });
 
-      // @effect-diagnostics anyUnknownInErrorContext:off -- the public task overloads preserve concrete error and requirement channels at this implementation boundary
       const exit = yield* Effect.exit(run(ctx));
 
       if (Exit.isSuccess(exit)) {
@@ -695,7 +701,11 @@ export class Machine<
           phase: "success",
         });
         const successEvent =
-          options.onSuccess !== undefined ? options.onSuccess(exit.value, ctx) : exit.value;
+          options.onSuccess !== undefined
+            ? options.onSuccess(exit.value, ctx)
+            : isEvent !== undefined && isEvent(exit.value)
+              ? exit.value
+              : yield* Effect.die("Task shorthand produced an invalid machine event");
         yield* ctx.self.send(successEvent);
         yield* Effect.yieldNow;
         return;
@@ -723,13 +733,11 @@ export class Machine<
         yield* Effect.yieldNow;
         return;
       }
-      // @effect-diagnostics anyUnknownInErrorContext:off
       return yield* Effect.failCause(cause).pipe(Effect.orDie);
     });
 
     return this.registerStateEffect(stateOrStates, handler);
   }
-  /* eslint-enable @typescript-eslint/no-explicit-any */
 
   // ---- timeout ----
 
@@ -756,7 +764,7 @@ export class Machine<
    */
   timeout<NS extends VariantsUnion<_SD> & BrandedState>(
     state: TaggedOrConstructor<NS>,
-    config: TimeoutConfig<NS, VariantsUnion<_ED> & BrandedEvent>,
+    config: TimeoutConfig<NS, Event & VariantsUnion<_ED> & BrandedEvent>,
   ): Machine<State, Event, R, _SD, _ED> {
     const stateTag = getTag(state);
     const duration = config.duration;

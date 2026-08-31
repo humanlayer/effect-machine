@@ -29,6 +29,7 @@ import {
 } from "effect";
 
 import { type Machine, replay } from "../machine.js";
+import type { MachineSchemaDefinition } from "../schema.js";
 import type { ActorSystemService } from "../actor.js";
 import { ActorSystem as ActorSystemTag, makeSystem } from "../actor.js";
 import type { ProcessEventHooks } from "../internal/transition.js";
@@ -139,8 +140,10 @@ function layer<
   E extends { readonly _tag: string },
   R,
   EntityType extends string,
+  StateDefinition extends Record<string, Schema.Struct.Fields>,
+  EventDefinition extends MachineSchemaDefinition,
 >(
-  entity: MachineEntity<S, E, R, EntityType>,
+  entity: MachineEntity<S, E, R, EntityType, StateDefinition, EventDefinition>,
   options?: EntityOptionsWithoutPersistence<S, E>,
 ): EntityLayer<R, never>;
 function layer<
@@ -148,8 +151,10 @@ function layer<
   E extends { readonly _tag: string },
   R,
   EntityType extends string,
+  StateDefinition extends Record<string, Schema.Struct.Fields>,
+  EventDefinition extends MachineSchemaDefinition,
 >(
-  entity: MachineEntity<S, E, R, EntityType>,
+  entity: MachineEntity<S, E, R, EntityType, StateDefinition, EventDefinition>,
   options: EntityOptionsWithPersistence<S, E>,
 ): EntityLayer<R, PersistenceAdapter>;
 function layer<
@@ -157,8 +162,10 @@ function layer<
   E extends { readonly _tag: string },
   R,
   EntityType extends string,
+  StateDefinition extends Record<string, Schema.Struct.Fields>,
+  EventDefinition extends MachineSchemaDefinition,
 >(
-  entity: MachineEntity<S, E, R, EntityType>,
+  entity: MachineEntity<S, E, R, EntityType, StateDefinition, EventDefinition>,
   options: EntityMachineOptions<S, E>,
 ): EntityLayer<R, PersistenceAdapter>;
 function layer<
@@ -166,7 +173,12 @@ function layer<
   E extends { readonly _tag: string },
   R,
   EntityType extends string,
->(entity: MachineEntity<S, E, R, EntityType>, options?: EntityMachineOptions<S, E>) {
+  StateDefinition extends Record<string, Schema.Struct.Fields>,
+  EventDefinition extends MachineSchemaDefinition,
+>(
+  entity: MachineEntity<S, E, R, EntityType, StateDefinition, EventDefinition>,
+  options?: EntityMachineOptions<S, E>,
+) {
   type Rpcs = EntityRpcs<Schema.Codec<S>, Schema.Codec<E>>[number];
   const machine = entity.machine;
   const persistence = options?.persistence;

@@ -104,6 +104,14 @@ const _test6 = Machine.make({
   onSuccess: () => MyEvent.Complete,
 });
 
+// Task shorthand is only valid when the task itself returns a machine event.
+const _invalidTaskShorthand = Machine.make({
+  state: MyState,
+  event: MyEvent,
+  initial: MyState.Loading({ url: "/" }),
+  // @ts-expect-error - non-event task results require an onSuccess mapper
+}).task(MyState.Loading, () => Effect.succeed(123), {});
+
 const _test6Spawn = Machine.spawn(_test6);
 type _Test6RequiresService = Assert<
   MyService extends EffectRequirements<typeof _test6Spawn> ? true : false
