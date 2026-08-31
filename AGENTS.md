@@ -37,7 +37,7 @@ const machine = Machine.make({ state, event, initial })
   .final(State.Done);
 ```
 
-- Builder methods mutate `this`, return `this`
+- Transition/final/postpone methods mutate `this`; requirement-growing `.spawn()`, `.task()`, `.timeout()`, and `.background()` methods are copy-on-write
 - Builder chain ends naturally — no terminal method needed
 - `.onAny()` fires when no specific `.on()` matches for that event
 
@@ -297,15 +297,15 @@ Wire machines to `@effect/cluster` for distributed actors:
 import { toEntity, EntityMachine } from "@humanlayer/effect-machine/cluster";
 
 const OrderEntity = toEntity(orderMachine, { type: "Order" });
-const OrderEntityLayer = EntityMachine.layer(OrderEntity, orderMachine, {
+const OrderEntityLayer = EntityMachine.layer(OrderEntity, {
   initializeState: (entityId) => OrderState.Pending({ orderId: entityId }),
   persistence: { strategy: "journal" },
 });
 ```
 
-- `toEntity` generates Entity with Send/Ask/GetState/WatchState RPCs
-- `EntityMachine.layer` wires machine to cluster via shared runtime kernel
-- `EntityActorRef`: typed client wrapper (send/ask/snapshot/watch/waitFor)
+- `toEntity` generates a machine-owned Entity with Send/Ask/GetState/WatchState RPCs
+- `EntityMachine.layer` wires the Entity's machine to cluster via the shared runtime kernel
+- `EntityActorRef`: `makeEntityActorRef(entity, client, id)` decodes Ask replies and preserves client errors
 
 ### Entity Persistence
 
@@ -320,7 +320,7 @@ Opt-in via `EntityMachineOptions.persistence`:
 ### Cluster Gotchas
 
 - Entity tests use `Entity.makeTestClient` + `ShardingConfig.layer` + `Effect.scoped`
-- `EntityMachine.layer` accepts raw `Machine`
+- `EntityMachine.layer` accepts the `MachineEntity` returned by `toEntity`; the entity owns its machine and protocol
 - Entity RPCs use `.tag` field (not `._tag`) to distinguish request types
 - WatchState test skipped due to effect beta Queue bug
 

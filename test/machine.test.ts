@@ -2,8 +2,7 @@
 import { Effect, Schema } from "effect";
 import { describe, expect, test } from "bun:test";
 
-import { Machine, simulate, State, Event, Slot } from "../src/index.js";
-import { materializeMachine } from "../src/machine.js";
+import { Machine, simulate, State, Event } from "../src/index.js";
 
 const CounterState = State({
   Idle: { count: Schema.Number },
@@ -19,6 +18,30 @@ const CounterEvent = Event({
 });
 
 describe("Machine", () => {
+  test("requirement-growing methods are copy-on-write", () => {
+    const base = Machine.make({
+      state: CounterState,
+      event: CounterEvent,
+      initial: CounterState.Idle({ count: 0 }),
+    }).on(CounterState.Idle, CounterEvent.Start, ({ state }) =>
+      CounterState.Counting({ count: state.count }),
+    );
+
+    const withSpawn = base.spawn(CounterState.Counting, () => Effect.void);
+    const withBackground = base.background(() => Effect.void);
+    const withTask = base.task(CounterState.Counting, () => Effect.succeed(CounterEvent.Stop), {});
+
+    expect(withSpawn).not.toBe(base);
+    expect(withBackground).not.toBe(base);
+    expect(withTask).not.toBe(base);
+    expect(base.spawnEffects).toHaveLength(0);
+    expect(base.backgroundEffects).toHaveLength(0);
+    expect(withSpawn.spawnEffects).toHaveLength(1);
+    expect(withBackground.backgroundEffects).toHaveLength(1);
+    expect(withTask.spawnEffects).toHaveLength(1);
+    expect(withSpawn.transitions).toHaveLength(1);
+  });
+
   test("creates machine with initial state using .pipe() syntax", () => {
     const machine = Machine.make({
       state: CounterState,
@@ -59,58 +82,6 @@ describe("Machine", () => {
 
         expect(result.finalState._tag).toBe("Done");
         expect(result.finalState.count).toBe(2);
-      }),
-    );
-  });
-
-  test("supports slots via Slot.define", async () => {
-    const CounterSlots = Slot.define({
-      belowLimit: Slot.fn({ limit: Schema.Number }, Schema.Boolean),
-    });
-
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const machine = Machine.make({
-          state: CounterState,
-          event: CounterEvent,
-          slots: CounterSlots,
-          initial: CounterState.Counting({ count: 0 }),
-        })
-          .on(CounterState.Counting, CounterEvent.Increment, ({ state, slots }) =>
-            Effect.gen(function* () {
-              if (yield* slots.belowLimit({ limit: 3 })) {
-                return CounterState.Counting({ count: state.count + 1 });
-              }
-              return state;
-            }),
-          )
-          .on(CounterState.Counting, CounterEvent.Stop, ({ state }) =>
-            CounterState.Done({ count: state.count }),
-          )
-          .final(CounterState.Done);
-
-        const result = yield* simulate(
-          machine,
-          [
-            CounterEvent.Increment,
-            CounterEvent.Increment,
-            CounterEvent.Increment,
-            CounterEvent.Increment, // blocked
-            CounterEvent.Stop,
-          ],
-          {
-            slots: {
-              belowLimit: ({ limit }: { limit: number }) =>
-                Effect.gen(function* () {
-                  const ctx = yield* machine.Context;
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  return (ctx.state as any).count < limit;
-                }),
-            },
-          },
-        );
-
-        expect(result.finalState.count).toBe(3);
       }),
     );
   });
@@ -351,57 +322,5 @@ describe(".from()", () => {
       simulate(machine, [FlowEvent.Submit, FlowEvent.Approve]),
     );
     expect(approved.finalState._tag).toBe("Approved");
-  });
-});
-
-// ============================================================================
-//  (F7)
-// ============================================================================
-
-describe("materializeMachine", () => {
-  test("throws ProvisionValidationError when slots missing", () => {
-    const TestSlots = Slot.define({
-      check: Slot.fn({}, Schema.Boolean),
-      notify: Slot.fn({}),
-    });
-
-    const machine = Machine.make({
-      state: CounterState,
-      event: CounterEvent,
-      slots: TestSlots,
-      initial: CounterState.Idle({ count: 0 }),
-    });
-
-    expect(() => materializeMachine(machine, {})).toThrow();
-  });
-
-  test("succeeds when all handlers provided", () => {
-    const TestSlots = Slot.define({
-      check: Slot.fn({}, Schema.Boolean),
-    });
-
-    const machine = Machine.make({
-      state: CounterState,
-      event: CounterEvent,
-      slots: TestSlots,
-      initial: CounterState.Idle({ count: 0 }),
-    });
-
-    const materialized = materializeMachine(machine, {
-      check: () => true,
-    });
-
-    expect(materialized.initial._tag).toBe("Idle");
-  });
-
-  test("no-arg materialize works on slotless machine", () => {
-    const machine = Machine.make({
-      state: CounterState,
-      event: CounterEvent,
-      initial: CounterState.Idle({ count: 0 }),
-    });
-
-    const materialized = materializeMachine(machine);
-    expect(materialized.initial._tag).toBe("Idle");
   });
 });

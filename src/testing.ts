@@ -1,26 +1,12 @@
 import { Effect, SubscriptionRef } from "effect";
 
-import type { Machine, MachineRef } from "./machine.js";
-import { materializeMachine } from "./machine.js";
+import type { Machine } from "./machine.js";
 import { AssertionError } from "./errors.js";
-import type { SlotsDef, ProvideSlots } from "./slot.js";
 import { executeTransition, shouldPostpone } from "./internal/transition.js";
-import { stubSystem } from "./internal/utils.js";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type MachineInput<S, E, R, SD extends SlotsDef = Record<string, never>> =
+type MachineInput<S extends { readonly _tag: string }, E extends { readonly _tag: string }, R> =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  Machine<S, E, R, any, any, SD>;
-
-const makeDummySelf = <E>(label: string): MachineRef<E> => {
-  const dummySend = Effect.fn(label)((_event: E) => Effect.void);
-  return {
-    send: dummySend,
-    cast: dummySend,
-    spawn: () => Effect.die(`spawn not supported in ${label}`),
-    reply: () => Effect.succeed(false),
-  };
-};
+  Machine<S, E, R, any, any>;
 
 /**
  * Result of simulating events through a machine
@@ -33,8 +19,7 @@ export interface SimulationResult<S> {
 /**
  * Simulate a sequence of events through a machine without running an actor.
  * Useful for testing state transitions in isolation.
- * Does not run onEnter/spawn/background effects, but does run slots
- * within transition handlers.
+ * Does not run state-scoped or background effects.
  *
  * @example
  * ```ts
@@ -54,25 +39,7 @@ export const simulate = Effect.fn("effect-machine.simulate")(function* <
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
-  SD extends SlotsDef = Record<string, never>,
->(
-  input: MachineInput<S, E, R, SD>,
-  events: ReadonlyArray<E>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { slots?: ProvideSlots<SD, any> },
-) {
-  // SAFETY: materialization preserves this input machine's state, event, and slot domains.
-  const machine = materializeMachine(input, options?.slots) as Machine<
-    S,
-    E,
-    R,
-    Record<string, never>,
-    Record<string, never>,
-    SD
-  >;
-
-  const dummySelf = makeDummySelf<E>("effect-machine.testing.simulate");
-
+>(machine: MachineInput<S, E, R>, events: ReadonlyArray<E>) {
   let currentState = machine.initial;
   const states: S[] = [currentState];
   const hasPostponeRules = machine.postponeRules.length > 0;
@@ -85,14 +52,7 @@ export const simulate = Effect.fn("effect-machine.simulate")(function* <
       continue;
     }
 
-    const result = yield* executeTransition(
-      machine,
-      currentState,
-      event,
-      dummySelf,
-      stubSystem,
-      "simulation",
-    );
+    const result = yield* executeTransition(machine, currentState, event);
 
     if (!result.transitioned) {
       continue;
@@ -117,14 +77,7 @@ export const simulate = Effect.fn("effect-machine.simulate")(function* <
           postponed.push(postponedEvent);
           continue;
         }
-        const drainResult = yield* executeTransition(
-          machine,
-          currentState,
-          postponedEvent,
-          dummySelf,
-          stubSystem,
-          "simulation",
-        );
+        const drainResult = yield* executeTransition(machine, currentState, postponedEvent);
         if (drainResult.transitioned) {
           currentState = drainResult.newState;
           states.push(currentState);
@@ -149,15 +102,8 @@ export const assertReaches = Effect.fn("effect-machine.assertReaches")(function*
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
-  SD extends SlotsDef = Record<string, never>,
->(
-  input: MachineInput<S, E, R, SD>,
-  events: ReadonlyArray<E>,
-  expectedTag: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { slots?: ProvideSlots<SD, any> },
-) {
-  const result = yield* simulate(input, events, options);
+>(input: MachineInput<S, E, R>, events: ReadonlyArray<E>, expectedTag: string) {
+  const result = yield* simulate(input, events);
   if (result.finalState._tag !== expectedTag) {
     return yield* new AssertionError({
       message:
@@ -184,15 +130,8 @@ export const assertPath = Effect.fn("effect-machine.assertPath")(function* <
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
-  SD extends SlotsDef = Record<string, never>,
->(
-  input: MachineInput<S, E, R, SD>,
-  events: ReadonlyArray<E>,
-  expectedPath: ReadonlyArray<string>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { slots?: ProvideSlots<SD, any> },
-) {
-  const result = yield* simulate(input, events, options);
+>(input: MachineInput<S, E, R>, events: ReadonlyArray<E>, expectedPath: ReadonlyArray<string>) {
+  const result = yield* simulate(input, events);
   const actualPath = result.states.map((s) => s._tag);
 
   if (actualPath.length !== expectedPath.length) {
@@ -235,15 +174,8 @@ export const assertNeverReaches = Effect.fn("effect-machine.assertNeverReaches")
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
-  SD extends SlotsDef = Record<string, never>,
->(
-  input: MachineInput<S, E, R, SD>,
-  events: ReadonlyArray<E>,
-  forbiddenTag: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  options?: { slots?: ProvideSlots<SD, any> },
-) {
-  const result = yield* simulate(input, events, options);
+>(input: MachineInput<S, E, R>, events: ReadonlyArray<E>, forbiddenTag: string) {
+  const result = yield* simulate(input, events);
 
   const visitedIndex = result.states.findIndex((s) => s._tag === forbiddenTag);
   if (visitedIndex !== -1) {
@@ -269,21 +201,17 @@ export interface TestHarness<S, E, R> {
 /**
  * Options for creating a test harness
  */
-export interface TestHarnessOptions<S, E, SD extends SlotsDef = Record<string, never>> {
+export interface TestHarnessOptions<S, E> {
   /**
    * Called after each transition with the previous state, event, and new state.
    * Useful for logging or spying on transitions.
    */
   readonly onTransition?: (from: S, event: E, to: S) => void;
-  /** Slot handler implementations. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  readonly slots?: ProvideSlots<SD, any>;
 }
 
 /**
  * Create a test harness for step-by-step testing.
- * Does not run onEnter/spawn/background effects, but does run slots
- * within transition handlers.
+ * Does not run state-scoped or background effects.
  *
  * @example Basic usage
  * ```ts
@@ -305,20 +233,7 @@ export const createTestHarness = Effect.fn("effect-machine.createTestHarness")(f
   S extends { readonly _tag: string },
   E extends { readonly _tag: string },
   R,
-  SD extends SlotsDef = Record<string, never>,
->(input: MachineInput<S, E, R, SD>, options?: TestHarnessOptions<S, E, SD>) {
-  // SAFETY: materialization preserves this input machine's state, event, and slot domains.
-  const machine = materializeMachine(input, options?.slots) as Machine<
-    S,
-    E,
-    R,
-    Record<string, never>,
-    Record<string, never>,
-    SD
-  >;
-
-  const dummySelf = makeDummySelf<E>("effect-machine.testing.harness");
-
+>(machine: MachineInput<S, E, R>, options?: TestHarnessOptions<S, E>) {
   const stateRef = yield* SubscriptionRef.make(machine.initial);
   const hasPostponeRules = machine.postponeRules.length > 0;
   const postponed: E[] = [];
@@ -332,14 +247,7 @@ export const createTestHarness = Effect.fn("effect-machine.createTestHarness")(f
       return currentState;
     }
 
-    const result = yield* executeTransition(
-      machine,
-      currentState,
-      event,
-      dummySelf,
-      stubSystem,
-      "test-harness",
-    );
+    const result = yield* executeTransition(machine, currentState, event);
 
     if (!result.transitioned) {
       return currentState;
@@ -366,14 +274,7 @@ export const createTestHarness = Effect.fn("effect-machine.createTestHarness")(f
           postponed.push(postponedEvent);
           continue;
         }
-        const drainResult = yield* executeTransition(
-          machine,
-          state,
-          postponedEvent,
-          dummySelf,
-          stubSystem,
-          "test-harness",
-        );
+        const drainResult = yield* executeTransition(machine, state, postponedEvent);
         if (drainResult.transitioned) {
           yield* SubscriptionRef.set(stateRef, drainResult.newState);
           currentTag = drainResult.newState._tag;

@@ -1,24 +1,6 @@
 // Machine namespace (Effect-style)
 export * as Machine from "./machine.js";
 
-// Legacy slot module
-/** @deprecated Prefer Effect services and layers for machine dependencies. */
-export { Slot } from "./slot.js";
-export type {
-  SlotsDef,
-  SlotsSchema,
-  SlotCalls,
-  SlotCall,
-  SlotFnDef,
-  SlotHandler,
-  SlotRequest,
-  SlotResult,
-  SlotInvocation,
-  ProvideSlots,
-  HasSlotKeys,
-  MachineContext,
-} from "./slot.js";
-
 // Errors
 export {
   ActorStoppedError,
@@ -29,15 +11,17 @@ export {
   MissingSchemaError,
   NoReplyError,
   PersistenceError,
-  ProvisionValidationError,
-  SlotCodecError,
-  SlotProvisionError,
   VersionConflictError,
 } from "./errors.js";
 
 // Schema-first State/Event definitions
 export { State, Event } from "./schema.js";
-export type { MachineStateSchema, MachineEventSchema, ReplyFields } from "./schema.js";
+export type {
+  MachineStateSchema,
+  MachineEventSchema,
+  ReplyFields,
+  ReplyVariant,
+} from "./schema.js";
 
 // Core machine types (for advanced use)
 export type {
@@ -58,12 +42,14 @@ export type {
   Durability,
   DurabilityCommit,
   Lifecycle,
+  LifecycleEvent,
 } from "./machine.js";
 
 // Actor types and system
 export type {
   ActorRef,
   ActorRefSync,
+  ActorHandle,
   ActorSystemService as ActorSystem,
   ProcessEventResult,
   SystemEvent,

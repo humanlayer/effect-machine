@@ -33,13 +33,18 @@
  * })
  *
  * // Create layer
- * const OrderEntityLayer = EntityMachine.layer(OrderEntity, orderMachine)
+ * const OrderEntityLayer = EntityMachine.layer(OrderEntity)
  * ```
  *
  * @module
  */
 
-export { toEntity, type ToEntityOptions, type EntityRpcs } from "./to-entity.js";
+export {
+  toEntity,
+  type ToEntityOptions,
+  type EntityRpcs,
+  type MachineEntity,
+} from "./to-entity.js";
 export { EntityMachine, type EntityMachineOptions } from "./entity-machine.js";
 export { type EntityActorRef, makeEntityActorRef } from "./entity-actor-ref.js";
 export {

@@ -1,5 +1,5 @@
 // @effect-diagnostics strictEffectProvide:off - tests are entry points
-import { Cause, Effect, Schema } from "effect";
+import { Cause, Effect, Exit, Schema } from "effect";
 
 import { Machine, State, Event } from "../src/index.js";
 import { describe, expect, it } from "effect-bun-test";
@@ -146,6 +146,100 @@ describe("ActorRef.ask", () => {
 
       const result = yield* actor.ask(TestEvent.GetNothing);
       expect(result).toBeUndefined();
+    }),
+  );
+
+  it.scopedLive("decodes a transforming reply schema exactly once", () =>
+    Effect.gen(function* () {
+      const TransformEvent = Event({
+        GetCount: Event.reply({}, Schema.NumberFromString),
+      });
+
+      const machine = Machine.make({
+        state: TestState,
+        event: TransformEvent,
+        initial: TestState.Active({ count: 7 }),
+      }).on(TestState.Active, TransformEvent.GetCount, ({ state }) =>
+        Machine.reply(state, state.count),
+      );
+
+      const actor = yield* Machine.spawn(machine);
+      yield* actor.start;
+
+      const count = yield* actor.ask(TransformEvent.GetCount);
+      expect(count).toBe(7);
+      const typedCount: number = count;
+      expect(typedCount).toBe(7);
+    }),
+  );
+
+  it.scopedLive("decodes a deferred transforming reply exactly once", () =>
+    Effect.gen(function* () {
+      const DeferredState = State({
+        Idle: {},
+        Replying: {},
+      });
+      const DeferredEvent = Event({
+        GetCount: Event.reply({}, Schema.NumberFromString),
+      });
+      const machine = Machine.make({
+        state: DeferredState,
+        event: DeferredEvent,
+        initial: DeferredState.Idle,
+      })
+        .on(DeferredState.Idle, DeferredEvent.GetCount, () =>
+          Machine.deferReply(DeferredState.Replying),
+        )
+        .spawn(DeferredState.Replying, ({ self }) =>
+          Effect.sleep("10 millis").pipe(Effect.andThen(self.reply(9)), Effect.asVoid),
+        );
+
+      const actor = yield* Machine.spawn(machine);
+      yield* actor.start;
+
+      const count = yield* actor.ask(DeferredEvent.GetCount).pipe(Effect.timeout("2 seconds"));
+      expect(count).toBe(9);
+      const typedCount: number = count;
+      expect(typedCount).toBe(9);
+    }),
+  );
+
+  it.scopedLive("defects a deferred ask when transforming reply encoding fails", () =>
+    Effect.gen(function* () {
+      const DeferredState = State({
+        Idle: {},
+        Replying: {},
+      });
+      const DeferredEvent = Event({
+        GetCount: Event.reply({}, Schema.NumberFromString),
+      });
+      const machine = Machine.make({
+        state: DeferredState,
+        event: DeferredEvent,
+        initial: DeferredState.Idle,
+      })
+        .on(DeferredState.Idle, DeferredEvent.GetCount, () =>
+          Machine.deferReply(DeferredState.Replying),
+        )
+        .spawn(DeferredState.Replying, ({ self }) =>
+          Effect.sleep("10 millis").pipe(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- intentional encoding mismatch
+            Effect.andThen(self.reply("not-a-number" as any)),
+            Effect.asVoid,
+          ),
+        );
+
+      const actor = yield* Machine.spawn(machine);
+      yield* actor.start;
+
+      const exit = yield* actor
+        .ask(DeferredEvent.GetCount)
+        .pipe(Effect.timeout("2 seconds"), Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(Cause.hasDies(exit.cause)).toBe(true);
+        expect(Cause.squash(exit.cause)).toHaveProperty("_tag", "SchemaError");
+      }
     }),
   );
 

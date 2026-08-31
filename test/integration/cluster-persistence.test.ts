@@ -53,6 +53,22 @@ const counterMachine = Machine.make({
   .on(CounterState.Active, CounterEvent.Finish, () => CounterState.Done)
   .final(CounterState.Done);
 
+const TransformState = State({
+  Active: { count: Schema.NumberFromString },
+});
+
+const TransformEvent = Event({
+  Add: { amount: Schema.NumberFromString },
+});
+
+const transformMachine = Machine.make({
+  state: TransformState,
+  event: TransformEvent,
+  initial: TransformState.Active({ count: 1 }),
+}).on(TransformState.Active, TransformEvent.Add, ({ state, event }) =>
+  TransformState.Active({ count: state.count + event.amount }),
+);
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -87,7 +103,7 @@ const runPersistenceTest = <A>(opts: {
       const { layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
 
       const entity = toEntity(counterMachine, { type: opts.entityType });
-      const entityLayer = EntityMachine.layer(entity, counterMachine, {
+      const entityLayer = EntityMachine.layer(entity, {
         initializeState: () => CounterState.Active({ count: 0 }),
         persistence: { strategy: opts.strategy },
       });
@@ -119,11 +135,68 @@ const runPersistenceTest = <A>(opts: {
     }) as Effect.Effect<void>,
   );
 
+const runTransformingPersistenceTest = (strategy: "snapshot" | "journal"): Promise<void> =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const { storeRef, layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
+      const entityType = strategy === "snapshot" ? "TransformSnapshot" : "TransformJournal";
+      const entity = toEntity(transformMachine, { type: entityType });
+      const entityLayer = EntityMachine.layer(entity, {
+        initializeState: () => TransformState.Active({ count: 1 }),
+        persistence: { strategy },
+      });
+      const provideLayer = entityLayer.pipe(
+        Layer.provide(ActorSystemDefault),
+        Layer.provide(adapterLayer),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const makeClient = yield* Entity.makeTestClient(entity, provideLayer);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const client = (yield* makeClient("transform-1")) as any;
+          const state = yield* client.Send({ event: TransformEvent.Add({ amount: 2 }) });
+          expect(state.count).toBe(3);
+        }),
+      ).pipe(Effect.provide(TestShardingConfig));
+
+      const store = yield* Ref.get(storeRef);
+      const entry = store.get(`${entityType}/transform-1`);
+      expect(entry?.snapshot?.state).toEqual({ _tag: "Active", count: "3" });
+
+      if (strategy === "journal") {
+        expect(entry?.events[0]?.event).toEqual({ _tag: "Add", amount: "2" });
+        if (entry !== undefined) entry.snapshot = undefined;
+      }
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const makeClient = yield* Entity.makeTestClient(entity, provideLayer);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const client = (yield* makeClient("transform-1")) as any;
+          const state = yield* client.GetState();
+          expect(state._tag).toBe("Active");
+          expect(state.count).toBe(3);
+          const typedCount: number = state.count;
+          expect(typedCount).toBe(3);
+        }),
+      ).pipe(Effect.provide(TestShardingConfig));
+    }) as Effect.Effect<void>,
+  );
+
 // =============================================================================
 // Tests
 // =============================================================================
 
 describe("Entity Persistence", () => {
+  test("snapshot: transforming state codec round-trips encoded storage", async () => {
+    await runTransformingPersistenceTest("snapshot");
+  });
+
+  test("journal: transforming event codec replays encoded storage", async () => {
+    await runTransformingPersistenceTest("journal");
+  });
+
   // ---------------------------------------------------------------------------
   // 1. Snapshot strategy — state survives deactivation
   // ---------------------------------------------------------------------------
@@ -179,7 +252,7 @@ describe("Entity Persistence", () => {
         const { layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
 
         const entity = toEntity(counterMachine, { type: "Fresh" });
-        const entityLayer = EntityMachine.layer(entity, counterMachine, {
+        const entityLayer = EntityMachine.layer(entity, {
           initializeState: () => CounterState.Active({ count: 42 }),
           persistence: { strategy: "snapshot" },
         });
@@ -210,7 +283,7 @@ describe("Entity Persistence", () => {
         const { storeRef, layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
 
         const entity = toEntity(counterMachine, { type: "SameTag" });
-        const entityLayer = EntityMachine.layer(entity, counterMachine, {
+        const entityLayer = EntityMachine.layer(entity, {
           initializeState: () => CounterState.Active({ count: 0 }),
           persistence: { strategy: "journal" },
         });
@@ -249,7 +322,7 @@ describe("Entity Persistence", () => {
         const { storeRef, layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
 
         const entity = toEntity(counterMachine, { type: "DeactivSnap" });
-        const entityLayer = EntityMachine.layer(entity, counterMachine, {
+        const entityLayer = EntityMachine.layer(entity, {
           initializeState: () => CounterState.Active({ count: 0 }),
           persistence: { strategy: "snapshot" },
         });
@@ -288,7 +361,7 @@ describe("Entity Persistence", () => {
         const { storeRef, layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
 
         const entity = toEntity(counterMachine, { type: "VersionTrack" });
-        const entityLayer = EntityMachine.layer(entity, counterMachine, {
+        const entityLayer = EntityMachine.layer(entity, {
           initializeState: () => CounterState.Active({ count: 0 }),
           persistence: { strategy: "journal" },
         });
@@ -326,7 +399,7 @@ describe("Entity Persistence", () => {
         const { storeRef, layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
 
         const entity = toEntity(counterMachine, { type: "JournalSnap" });
-        const entityLayer = EntityMachine.layer(entity, counterMachine, {
+        const entityLayer = EntityMachine.layer(entity, {
           initializeState: () => CounterState.Active({ count: 0 }),
           persistence: { strategy: "journal" },
         });
@@ -400,7 +473,7 @@ describe("Entity Persistence", () => {
 
     const entity = toEntity(counterMachine, { type: "FailAppend" });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const entityLayer = EntityMachine.layer(entity, counterMachine, {
+    const entityLayer = EntityMachine.layer(entity, {
       initializeState: () => CounterState.Active({ count: 0 }),
       persistence: { strategy: "journal" },
       // disableFatalDefects prevents the defect from crashing the test
@@ -460,7 +533,7 @@ describe("Entity Persistence", () => {
         const wrappedLayer = Layer.succeed(PersistenceAdapter, wrappedAdapter);
 
         const entity = toEntity(counterMachine, { type: "RecoverSnap" });
-        const entityLayer = EntityMachine.layer(entity, counterMachine, {
+        const entityLayer = EntityMachine.layer(entity, {
           initializeState: () => CounterState.Active({ count: 0 }),
           persistence: { strategy: "journal" },
           disableFatalDefects: true,
@@ -515,7 +588,7 @@ describe("Entity Persistence", () => {
         const { storeRef, layer: adapterLayer } = yield* makeInMemoryPersistenceAdapter;
 
         const entity = toEntity(counterMachine, { type: "SnapVersion" });
-        const entityLayer = EntityMachine.layer(entity, counterMachine, {
+        const entityLayer = EntityMachine.layer(entity, {
           initializeState: () => CounterState.Active({ count: 0 }),
           persistence: { strategy: "snapshot" },
         });

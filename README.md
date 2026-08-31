@@ -91,6 +91,15 @@ A few things to notice:
 - `.onAny(...)` is a fallback; a specific `.on(...)` wins.
 - `.task(...)` runs work on state entry, sends mapped completion events, and cancels work on state exit.
 
+Generated state and event constructors carry a static `_tag`, so `State.Active(...)` and
+`Event.Start(...)` remain directly usable in builder methods. If an older constructor returns a
+compatible tagged value but does not expose a static tag, adapt it explicitly instead of invoking
+it during registration:
+
+```ts
+const LegacyActive = Machine.tagged("Active", legacyActiveConstructor);
+```
+
 ## Transitions And Effects
 
 The fluent builder keeps state behavior beside the transitions that make it relevant:
@@ -103,9 +112,21 @@ The fluent builder keeps state behavior beside the transitions that make it rele
 
 Use `self.send(...)` from a state effect to feed work back into the machine. State effects can use Effect services and can be asynchronous; transition handlers stay pure.
 
+Methods that can add Effect requirements—`.spawn(...)`, `.task(...)`, `.timeout(...)`, and `.background(...)`—are copy-on-write. Always use their returned machine. This keeps an earlier alias truthful and unchanged:
+
+```ts
+const base = Machine.make({ state, event, initial });
+const withWorker = base.spawn(State.Running, worker);
+
+base.spawnEffects.length; // 0
+withWorker.spawnEffects.length; // 1
+```
+
+State-effect contexts expose an honest lifecycle event union: initial effects receive `$init`, while effects started after a state transition receive `$enter`.
+
 ## Services And Layers
 
-New machines use Effect's service system for dependencies, not actor-local slot maps. Define a dependency with `Context.Service` (the Effect v4 replacement for `ServiceMap.Service`), access it with `yield*` inside a state effect, and provide an implementation with a `Layer` at the program boundary.
+Machines use Effect's service system for dependencies. Define a dependency with `Context.Service` (the Effect v4 replacement for `ServiceMap.Service`), access it with `yield*` inside a state effect, and provide an implementation with a `Layer` at the program boundary.
 
 Requirements from `.task()`, `.spawn()`, and `.background()` are inferred by the machine and flow through `Machine.spawn`, `system.spawn`, and `EntityMachine.layer`. Transition handlers remain pure: they cannot require services or fail. Move I/O into a state effect and communicate its outcome with an event.
 
@@ -123,19 +144,6 @@ const program = Effect.gen(function* () {
 ```
 
 This also makes testing conventional Effect code: provide a test layer around the actor program. `simulate` and `createTestHarness` do not run state effects, so they do not require their services.
-
-### Migrating From Slots
-
-`Slot`, `Machine.make({ slots })`, handler `({ slots })`, and `{ slots }` spawn options remain as deprecated compatibility APIs. Use them only while migrating an existing machine; they are not the DI mechanism for new code.
-
-| Legacy slot pattern                     | Effect service replacement                                               |
-| --------------------------------------- | ------------------------------------------------------------------------ |
-| `Slot.define({ charge: Slot.fn(...) })` | `class Payments extends Context.Service<...>()("@app/Payments") {}`      |
-| `Machine.make({ ..., slots })`          | Read the service in `.task(...)`, `.spawn(...)`, or `.background(...)`   |
-| `Machine.spawn(machine, { slots })`     | `Machine.spawn(machine).pipe(Effect.provide(PaymentsLive))`              |
-| `system.spawn(id, machine, { slots })`  | Provide `PaymentsLive` around the program that calls `system.spawn(...)` |
-
-Legacy slot handlers must still be supplied explicitly at every execution boundary that uses them, such as `Machine.spawn`, `system.spawn`, `simulate`, `createTestHarness`, and `Machine.replay`. Their dependencies are not inferred through the machine type, so migrate them to Effect services when possible.
 
 ## Request And Reply
 
@@ -206,7 +214,7 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(ActorSystemDefault), Effect.provide(PaymentsLive));
 ```
 
-`ActorSystemService` also exposes `get(id)`, `stop(id)`, a snapshot `actors` map, an event `Stream`, and `subscribe(...)` for synchronous `ActorSpawned`, `ActorRestarted`, and `ActorStopped` notifications.
+`ActorSystemService` also exposes `get(id)`, `stop(id)`, a snapshot `actors` map, an event `Stream`, and `subscribe(...)` for synchronous `ActorSpawned`, `ActorRestarted`, and `ActorStopped` notifications. Typed `spawn` returns a full `ActorRef<State, Event>`. Heterogeneous lookups, maps, child collections, and system events expose `ActorHandle`, which supports lifecycle and read-only observation but cannot accept an event without a type witness.
 
 ## Recovery, Durability, And Supervision
 
@@ -306,18 +314,23 @@ import { EntityMachine, toEntity } from "@humanlayer/effect-machine/cluster";
 
 const CheckoutEntity = toEntity(checkoutMachine, { type: "Checkout" });
 
-const CheckoutEntityLayer = EntityMachine.layer(CheckoutEntity, checkoutMachine, {
+const CheckoutEntityLayer = EntityMachine.layer(CheckoutEntity, {
   initializeState: (entityId) => CheckoutState.ReviewingCart({ cartId: entityId, totalCents: 0 }),
   persistence: { strategy: "journal" },
 });
 ```
 
-`toEntity` requires a machine made with `Machine.make({ state, event, initial })`, then creates `Send`, `Ask`, `GetState`, and `WatchState` RPCs. `makeEntityActorRef(client, entityId)` wraps that protocol with a typed `send`, `ask`, `snapshot`, `watch`, and `waitFor` API.
+`toEntity` requires a machine made with `Machine.make({ state, event, initial })`, then returns a machine-owned entity with canonical `Send`, `Ask`, `GetState`, and `WatchState` RPCs. `EntityMachine.layer(entity, options?)` uses the machine carried by that entity, preventing protocol/machine mismatches. `makeEntityActorRef(entity, client, entityId)` wraps the protocol with typed `send`, `ask`, `snapshot`, `watch`, and `waitFor`; remote Ask values are decoded with the event's reply schema and client transport errors remain in each operation's error channel.
 
 Persistence is opt-in and resolves `PersistenceAdapter` from the entity layer's services:
 
 - **Snapshot** is the default. It saves on each state change unless `snapshotSchedule` controls the cadence, then restores on reactivation.
 - **Journal** appends every `Send` and `Ask` event inline, replays events after the latest snapshot, and saves a snapshot when the entity deactivates.
+
+Adapter writes encode runtime state and events through the machine codecs, and load methods return
+unknown stored records. Entity activation decodes the complete snapshot or journal
+record—including payload, version, and timestamp—exactly once before hydration or replay;
+malformed storage data defects activation rather than entering the machine.
 
 Entity options also include `maxIdleTime`, `mailboxCapacity`, `defectRetryPolicy`, and `disableFatalDefects`, which are forwarded to `@effect/cluster`.
 

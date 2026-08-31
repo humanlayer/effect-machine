@@ -13,8 +13,8 @@
  * All "bad" tests use @ts-expect-error on the handler return expression.
  */
 import { Effect, Schema, Context } from "effect";
-import { Machine, State, Event, Slot } from "../src/index.js";
-import type { ProvideSlots } from "../src/slot.js";
+import { Machine, State, Event } from "../src/index.js";
+import type { ActorHandle } from "../src/index.js";
 
 const MyState = State({
   Idle: {},
@@ -86,7 +86,14 @@ const _test5 = Machine.make({
   .on(MyState.Idle, MyEvent.Start, () => MyState.Loading({ url: "/" }))
   .spawn(MyState.Loading, () => MyService.pipe(Effect.asVoid));
 
-const _test5RequiresService: Effect.Effect<unknown, never, MyService> = Machine.spawn(_test5);
+type EffectRequirements<Value> =
+  Value extends Effect.Effect<infer _A, infer _E, infer R> ? R : never;
+type Assert<Condition extends true> = Condition;
+
+const _test5Spawn = Machine.spawn(_test5);
+type _Test5RequiresService = Assert<
+  MyService extends EffectRequirements<typeof _test5Spawn> ? true : false
+>;
 
 // Test 6: task handler can require a service, which also propagates to Machine.spawn
 const _test6 = Machine.make({
@@ -97,7 +104,32 @@ const _test6 = Machine.make({
   onSuccess: () => MyEvent.Complete,
 });
 
-const _test6RequiresService: Effect.Effect<unknown, never, MyService> = Machine.spawn(_test6);
+const _test6Spawn = Machine.spawn(_test6);
+type _Test6RequiresService = Assert<
+  MyService extends EffectRequirements<typeof _test6Spawn> ? true : false
+>;
+
+// Test 6b: requirement-growing methods do not mutate the type of an earlier alias
+const _test6bBase = Machine.make({
+  state: MyState,
+  event: MyEvent,
+  initial: MyState.Idle,
+});
+const _test6bWithService = _test6bBase.background(() => MyService.pipe(Effect.asVoid));
+const _test6bBaseSpawn = Machine.spawn(_test6bBase);
+const _test6bWithServiceSpawn = Machine.spawn(_test6bWithService);
+type _Test6bBaseStillServiceFree = Assert<
+  MyService extends EffectRequirements<typeof _test6bBaseSpawn> ? false : true
+>;
+type _Test6bRequiresService = Assert<
+  MyService extends EffectRequirements<typeof _test6bWithServiceSpawn> ? true : false
+>;
+
+// Heterogeneous lookup is intentionally eventless; exact spawn results remain ActorRef.
+const _actorHandleCannotSend = (handle: ActorHandle) => {
+  // @ts-expect-error - ActorHandle has no event type witness
+  handle.send(MyEvent.Start);
+};
 
 // ============================================================================
 // Reply Schema Type Constraints
@@ -122,6 +154,23 @@ const _test7 = Machine.make({
 }).on(ReplyState.Active, ReplyEvent.GetCount, ({ state }) =>
   Machine.reply(ReplyState.Active({ count: state.count }), state.count),
 );
+
+// Test 7b: onAny supports reply-bearing events with the same contract as on
+const _test7b = Machine.make({
+  state: ReplyState,
+  event: ReplyEvent,
+  initial: ReplyState.Active({ count: 0 }),
+}).onAny(ReplyEvent.GetCount, ({ state }) =>
+  Machine.reply(state, state._tag === "Active" ? state.count : 0),
+);
+
+// Test 7c: onAny requires Machine.reply() for reply-bearing events
+const _test7c = Machine.make({
+  state: ReplyState,
+  event: ReplyEvent,
+  initial: ReplyState.Active({ count: 0 }),
+  // @ts-expect-error - reply-bearing onAny handler requires Machine.reply()
+}).onAny(ReplyEvent.GetCount, ({ state }) => state);
 
 // Test 8: Handler for reply-bearing event CANNOT return plain state
 const _test8 = Machine.make({
@@ -156,95 +205,6 @@ const PayloadReplyEvent = Event({
 const _test9bPayload: Parameters<typeof PayloadReplyEvent.GetById>[0] = { id: "task-1" };
 const _test9b = PayloadReplyEvent.GetById(_test9bPayload);
 const _test9bId: string = _test9b.id;
-
-// ============================================================================
-// Slot Type Safety Regression Tests
-// ============================================================================
-
-const MySlots = Slot.define({
-  canRetry: Slot.fn({ max: Schema.Number }, Schema.Boolean),
-  fetchData: Slot.fn({ url: Schema.String }),
-  computeValue: Slot.fn({ input: Schema.Number }, Schema.Number),
-});
-type MySlotsDef = typeof MySlots.definitions;
-
-// Test 10: Slots are accessible via `slots` in handler context
-const _test10 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  slots: MySlots,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) =>
-  Effect.gen(function* () {
-    const canRetry = yield* slots.canRetry({ max: 3 });
-    if (canRetry) {
-      yield* slots.fetchData({ url: "/" });
-    }
-    return MyState.Loading({ url: "/" });
-  }),
-);
-
-// Test 11: Slot call with wrong param type is rejected
-const _test11 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  slots: MySlots,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) =>
-  Effect.gen(function* () {
-    // @ts-expect-error - max should be number, not string
-    yield* slots.canRetry({ max: "not a number" });
-    return MyState.Loading({ url: "/" });
-  }),
-);
-
-// Test 12: Slot return type is enforced
-const _test12 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  slots: MySlots,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) =>
-  Effect.gen(function* () {
-    // computeValue returns number, assigning to string should fail
-    // @ts-expect-error - computeValue returns number, not string
-    const _v: string = yield* slots.computeValue({ input: 42 });
-    return MyState.Loading({ url: "/" });
-  }),
-);
-
-// Test 13: ProvideSlots requires all slots to be implemented
-// @ts-expect-error - missing 'computeValue' property
-const _test13: ProvideSlots<MySlotsDef> = {
-  canRetry: ({ max }) => max > 0,
-  fetchData: ({ url }) => Effect.log(url),
-};
-
-// Test 14: ProvideSlots rejects wrong handler param types
-const _test14: ProvideSlots<MySlotsDef> = {
-  // @ts-expect-error - max should be number, handler expects string
-  canRetry: ({ max }: { max: string }) => max.length > 0,
-  fetchData: ({ url }) => Effect.log(url),
-  computeValue: ({ input }) => input * 2,
-};
-
-// Test 15: ProvideSlots accepts valid implementations (should compile)
-const _test15: ProvideSlots<MySlotsDef> = {
-  canRetry: ({ max }) => max > 0,
-  fetchData: ({ url }) => Effect.log(url),
-  computeValue: ({ input }) => input * 2,
-};
-
-// Test 16: Machine without slots — handler context has empty slots
-const _test16 = Machine.make({
-  state: MyState,
-  event: MyEvent,
-  initial: MyState.Idle,
-}).on(MyState.Idle, MyEvent.Start, ({ slots }) => {
-  // @ts-expect-error - no slots defined, canRetry doesn't exist
-  const _x = slots.canRetry;
-  return MyState.Loading({ url: "/" });
-});
 
 // This file should compile with all @ts-expect-error comments being valid
 export {};

@@ -6,9 +6,9 @@
  * transition index used for state/event matching.
  */
 import { describe, expect, test } from "bun:test";
-import { Effect, Schema } from "effect";
+import { Schema } from "effect";
 
-import { Event, Machine, Slot, State } from "../../src/index.js";
+import { Event, Machine, State } from "../../src/index.js";
 
 // Test state machine types
 const TestState = State({
@@ -61,33 +61,16 @@ describe("Transition Index", () => {
     expect(noTransitions.length).toBe(0);
   });
 
-  test("findTransitions returns single transition (guards now in handler)", () => {
-    // With the new API, guards are checked inside handlers
-    // So multiple transitions for same state/event just means multiple registrations
-    const TestSlots = Slot.define({
-      isSpecial: Slot.fn({}, Schema.Boolean),
-      isNormal: Slot.fn({}, Schema.Boolean),
-    });
-
+  test("findTransitions returns a single transition with in-handler conditions", () => {
     const machine = Machine.make({
       state: TestState,
       event: TestEvent,
-      slots: TestSlots,
       initial: TestState.Idle,
-    }).on(TestState.Idle, TestEvent.Start, ({ event, slots }) =>
-      Effect.gen(function* () {
-        if (yield* slots.isSpecial()) {
-          return TestState.Loading({ id: event.id });
-        }
-        if (yield* slots.isNormal()) {
-          return TestState.Loading({ id: event.id });
-        }
-        return TestState.Loading({ id: event.id });
-      }),
+    }).on(TestState.Idle, TestEvent.Start, ({ event }) =>
+      TestState.Loading({ id: event.id.startsWith("special-") ? event.id : `normal-${event.id}` }),
     );
 
     const transitions = Machine.findTransitions(machine, "Idle", "Start");
-    // Now there's just one transition with guards inside the handler
     expect(transitions.length).toBe(1);
   });
 

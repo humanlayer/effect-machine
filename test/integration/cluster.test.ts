@@ -22,9 +22,8 @@ import {
   simulate,
   State,
   Event,
-  Slot,
 } from "../../src/index.js";
-import { toEntity, EntityMachine } from "../../src/cluster/index.js";
+import { toEntity, EntityMachine, makeEntityActorRef } from "../../src/cluster/index.js";
 
 // =============================================================================
 // Schema-first definitions using MachineSchema
@@ -238,23 +237,13 @@ describe("Entity.makeTestClient with machine handler", () => {
   });
   type CounterEvent = typeof CounterEvent.Type;
 
-  const CounterSlots = Slot.define({
-    underLimit: Slot.fn({}, Schema.Boolean),
-  });
-
   const counterMachine = Machine.make({
     state: CounterState,
     event: CounterEvent,
-    slots: CounterSlots,
     initial: CounterState.Counting({ count: 0 }),
   })
-    .on(CounterState.Counting, CounterEvent.Increment, ({ state, slots }) =>
-      Effect.gen(function* () {
-        if (yield* slots.underLimit()) {
-          return CounterState.Counting({ count: state.count + 1 });
-        }
-        return state;
-      }),
+    .on(CounterState.Counting, CounterEvent.Increment, ({ state }) =>
+      state.count < 3 ? CounterState.Counting({ count: state.count + 1 }) : state,
     )
     .on(CounterState.Counting, CounterEvent.Finish, ({ state }) =>
       CounterState.Done({ count: state.count }),
@@ -284,28 +273,11 @@ describe("Entity.makeTestClient with machine handler", () => {
           Send: (envelope) =>
             Effect.gen(function* () {
               const currentState = yield* Ref.get(stateRef);
-              const event = envelope.payload.event as unknown as OrderEvent;
+              const event = envelope.payload.event;
 
-              const transitions = Machine.findTransitions(
-                orderMachine,
-                currentState._tag,
-                event._tag,
-              );
-
-              const transition = transitions[0];
-              if (transition === undefined) {
-                return currentState;
-              }
-
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test helper
-              const handlerResult = transition.handler({
-                state: currentState,
-                event,
-                slots: {} as any,
+              const newState = yield* Machine.replay(orderMachine, [event], {
+                from: currentState,
               });
-              const newState = Effect.isEffect(handlerResult)
-                ? yield* handlerResult
-                : handlerResult;
               yield* Ref.set(stateRef, newState);
               return newState;
             }),
@@ -339,27 +311,13 @@ describe("Entity.makeTestClient with machine handler", () => {
   test("guards work with simulate", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
-        const result = yield* simulate(
-          counterMachine,
-          [
-            CounterEvent.Increment,
-            CounterEvent.Increment,
-            CounterEvent.Increment,
-            CounterEvent.Increment, // blocked by guard
-            CounterEvent.Finish,
-          ],
-          {
-            slots: {
-              underLimit: () =>
-                Effect.gen(function* () {
-                  const ctx = yield* counterMachine.Context;
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const state = ctx.state as any;
-                  return state._tag === "Counting" && state.count < 3;
-                }),
-            },
-          },
-        );
+        const result = yield* simulate(counterMachine, [
+          CounterEvent.Increment,
+          CounterEvent.Increment,
+          CounterEvent.Increment,
+          CounterEvent.Increment, // blocked by guard
+          CounterEvent.Finish,
+        ]);
 
         expect(result.finalState._tag).toBe("Done");
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test assertion
@@ -382,7 +340,7 @@ describe("EntityMachine.layer", () => {
   // ---------------------------------------------------------------------------
   test("basic send changes state via EntityMachine.layer", async () => {
     const entity = toEntity(orderMachine, { type: "OrderSend" });
-    const entityLayer = EntityMachine.layer(entity, orderMachine, {
+    const entityLayer = EntityMachine.layer(entity, {
       initializeState: (entityId) => OrderState.Pending({ orderId: entityId }),
     });
 
@@ -426,7 +384,7 @@ describe("EntityMachine.layer", () => {
       .on(AskState.Active, AskEvent.GetCount, ({ state }) => Machine.reply(state, state.count));
 
     const entity = toEntity(askMachine, { type: "AskReply" });
-    const entityLayer = EntityMachine.layer(entity, askMachine, {
+    const entityLayer = EntityMachine.layer(entity, {
       initializeState: () => AskState.Active({ count: 42 }),
     });
 
@@ -438,7 +396,64 @@ describe("EntityMachine.layer", () => {
         );
         const client = yield* makeClient("ask-1");
 
-        const reply = yield* client.Ask({ event: AskEvent.GetCount });
+        const ref = makeEntityActorRef(entity, client, "ask-1");
+        const reply: number = yield* ref.ask(AskEvent.GetCount);
+        expect(reply).toBe(42);
+      }).pipe(Effect.scoped, Effect.provide(TestShardingConfig)) as Effect.Effect<void>,
+    );
+
+    const invalidReplyLayer = entity.toLayer({
+      Send: () => Effect.succeed(AskState.Active({ count: 0 })),
+      Ask: () => Effect.succeed("not-a-number"),
+      GetState: () => Effect.succeed(AskState.Active({ count: 0 })),
+      WatchState: () => Stream.empty,
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const makeClient = yield* Entity.makeTestClient(entity, invalidReplyLayer);
+        const client = yield* makeClient("invalid-reply");
+        const ref = makeEntityActorRef(entity, client, "invalid-reply");
+        const exit = yield* Effect.result(ref.ask(AskEvent.GetCount));
+        expect(exit._tag).toBe("Failure");
+        if (exit._tag === "Failure") {
+          expect(Schema.isSchemaError(exit.failure)).toBe(true);
+        }
+      }).pipe(Effect.scoped, Effect.provide(TestShardingConfig)) as Effect.Effect<void>,
+    );
+  });
+
+  test("deferred transforming ask decodes once via EntityMachine.layer", async () => {
+    const AskState = State({
+      Idle: {},
+      Replying: {},
+    });
+    const AskEvent = Event({
+      GetCount: Event.reply({}, Schema.NumberFromString),
+    });
+    const askMachine = Machine.make({
+      state: AskState,
+      event: AskEvent,
+      initial: AskState.Idle,
+    })
+      .on(AskState.Idle, AskEvent.GetCount, () => Machine.deferReply(AskState.Replying))
+      .spawn(AskState.Replying, ({ self }) =>
+        Effect.sleep("10 millis").pipe(Effect.andThen(self.reply(42)), Effect.asVoid),
+      );
+    const entity = toEntity(askMachine, { type: "DeferredTransformAsk" });
+    const entityLayer = EntityMachine.layer(entity, {
+      initializeState: () => AskState.Idle,
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const makeClient = yield* Entity.makeTestClient(
+          entity,
+          entityLayer.pipe(Layer.provide(ActorSystemDefault)),
+        );
+        const client = yield* makeClient("deferred-ask-1");
+        const ref = makeEntityActorRef(entity, client, "deferred-ask-1");
+        const reply: number = yield* ref.ask(AskEvent.GetCount).pipe(Effect.timeout("2 seconds"));
         expect(reply).toBe(42);
       }).pipe(Effect.scoped, Effect.provide(TestShardingConfig)) as Effect.Effect<void>,
     );
@@ -470,7 +485,7 @@ describe("EntityMachine.layer", () => {
       .final(BgState.Done);
 
     const entity = toEntity(bgMachine, { type: "Background" });
-    const entityLayer = EntityMachine.layer(entity, bgMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -496,7 +511,7 @@ describe("EntityMachine.layer", () => {
   // ---------------------------------------------------------------------------
   test("final state rejects further events", async () => {
     const entity = toEntity(orderMachine, { type: "OrderFinal" });
-    const entityLayer = EntityMachine.layer(entity, orderMachine, {
+    const entityLayer = EntityMachine.layer(entity, {
       initializeState: (entityId) => OrderState.Pending({ orderId: entityId }),
     });
 
@@ -553,7 +568,7 @@ describe("EntityMachine.layer", () => {
       .final(SpawnState.Done);
 
     const entity = toEntity(spawnMachine, { type: "SpawnEffect" });
-    const entityLayer = EntityMachine.layer(entity, spawnMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -605,7 +620,7 @@ describe("EntityMachine.layer", () => {
       .final(TimeoutState.TimedOut);
 
     const entity = toEntity(timeoutMachine, { type: "Timeout" });
-    const entityLayer = EntityMachine.layer(entity, timeoutMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -655,7 +670,7 @@ describe("EntityMachine.layer", () => {
       .final(PostponeState.Done);
 
     const entity = toEntity(postponeMachine, { type: "Postpone" });
-    const entityLayer = EntityMachine.layer(entity, postponeMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -723,7 +738,7 @@ describe("EntityMachine.layer", () => {
       .final(TaskState.Failed);
 
     const entity = toEntity(taskMachine, { type: "Task" });
-    const entityLayer = EntityMachine.layer(entity, taskMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -789,7 +804,7 @@ describe("EntityMachine.layer", () => {
       .final(RaceState.Done);
 
     const entity = toEntity(raceMachine, { type: "Race" });
-    const entityLayer = EntityMachine.layer(entity, raceMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -866,7 +881,7 @@ describe("EntityMachine.layer", () => {
 
     const entity = toEntity(spawnChildMachine, { type: "SpawnChild" });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const entityLayer = EntityMachine.layer(entity, spawnChildMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -911,7 +926,7 @@ describe("EntityMachine.layer", () => {
 
     const entity = toEntity(watchMachine, { type: "Watch" });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const entityLayer = EntityMachine.layer(entity, watchMachine, {});
+    const entityLayer = EntityMachine.layer(entity, {});
 
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -923,8 +938,7 @@ describe("EntityMachine.layer", () => {
 
         // Collect state changes in background via WatchState streaming RPC
         const collected: string[] = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const watchStream = (client as any).WatchState() as Stream.Stream<WatchState>;
+        const watchStream = client.WatchState();
 
         const collectFiber = yield* Effect.forkScoped(
           watchStream.pipe(
