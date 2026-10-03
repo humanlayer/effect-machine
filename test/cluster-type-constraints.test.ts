@@ -1,5 +1,5 @@
-import type { Sharding } from "effect/unstable/cluster";
-import type { RpcClient } from "effect/unstable/rpc";
+import type { Sharding } from "effect/cluster";
+import type { RpcClient } from "effect/rpc";
 import { Context, Effect, type Layer, Schema } from "effect";
 
 import { Event, Machine, State } from "../src/index.js";

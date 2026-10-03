@@ -322,7 +322,6 @@ Opt-in via `EntityMachineOptions.persistence`:
 - Entity tests use `Entity.makeTestClient` + `ShardingConfig.layer` + `Effect.scoped`
 - `EntityMachine.layer` accepts the `MachineEntity` returned by `toEntity`; the entity owns its machine and protocol
 - Entity RPCs use `.tag` field (not `._tag`) to distinguish request types
-- WatchState test skipped due to effect beta Queue bug
 
 ## Documentation
 

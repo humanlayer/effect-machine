@@ -10,7 +10,7 @@
  *
  * @module
  */
-import type { RpcClient } from "effect/unstable/rpc";
+import type { RpcClient } from "effect/rpc";
 import { Effect, Option, Schema, Stream } from "effect";
 
 import type { ExtractReply, ReplyTypeBrand } from "../internal/brands.js";
