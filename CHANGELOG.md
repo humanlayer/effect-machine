@@ -1,5 +1,11 @@
 # @humanlayer/effect-machine
 
+## 0.20.0
+
+### Minor Changes
+
+- [#7](https://github.com/humanlayer/effect-machine/pull/7) [`3062e7c`](https://github.com/humanlayer/effect-machine/commit/3062e7c5634c38de93ba7a2f590fbdf70cfb0096) Thanks [@K-Mistele](https://github.com/K-Mistele)! - Upgrade to Effect 4.0.0 stable. The `effect` peer range is now `^4.0.0`, and cluster/rpc imports move from `effect/unstable/cluster` and `effect/unstable/rpc` to `effect/cluster` and `effect/rpc`.
+
 ## 0.19.1
 
 ### Patch Changes
