@@ -43,14 +43,12 @@
   "devDependencies": {
     "@changesets/changelog-github": "^0.6.0",
     "@changesets/cli": "^2.30.0",
-    "@effect/cluster": "0.58.2",
-    "@effect/rpc": "0.75.1",
     "@effect/tsgo": "0.5.2",
     "@oxlint/plugins": "1.78.0",
     "@types/bun": "1.3.12",
     "@typescript/native-preview": "7.0.0-dev.20260507.1",
     "concurrently": "^9.2.1",
-    "effect": "4.0.0-beta.107",
+    "effect": "4.0.0",
     "effect-bun-test": "0.3.0",
     "lefthook": "^2.1.5",
     "oxfmt": "^0.44.0",
@@ -60,7 +58,7 @@
     "typescript": "^6.0.2"
   },
   "peerDependencies": {
-    "effect": "^4.0.0-beta.107"
+    "effect": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "effect": {

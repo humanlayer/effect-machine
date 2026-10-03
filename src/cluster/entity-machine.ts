@@ -11,9 +11,9 @@
  *
  * @module
  */
-import { Entity } from "effect/unstable/cluster";
-import type { Envelope, Sharding } from "effect/unstable/cluster";
-import type { Rpc } from "effect/unstable/rpc";
+import { Entity } from "effect/cluster";
+import type { Envelope, Sharding } from "effect/cluster";
+import type { Rpc } from "effect/rpc";
 import {
   Clock,
   type Duration,

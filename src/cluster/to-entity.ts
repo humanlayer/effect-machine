@@ -3,8 +3,8 @@
  *
  * @module
  */
-import { Entity } from "effect/unstable/cluster";
-import { Rpc } from "effect/unstable/rpc";
+import { Entity } from "effect/cluster";
+import { Rpc } from "effect/rpc";
 import { Schema } from "effect";
 
 import type { Machine } from "../machine.js";

@@ -8,7 +8,7 @@
  * Tests snapshot and journal persistence for entity-machine state
  * across deactivation/reactivation cycles.
  */
-import { Entity, ShardingConfig } from "effect/unstable/cluster";
+import { Entity, ShardingConfig } from "effect/cluster";
 import { Clock, Effect, Layer, Option, Ref, Schema } from "effect";
 import { describe, expect, test } from "bun:test";
 
